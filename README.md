@@ -72,6 +72,21 @@ En los menús: `W`/`S` o flechas para elegir, `A`/`D` para cambiar un valor, `J`
 
 - **Dificultad:** *Fácil* (avisos un 30 % más largos, más pausa entre ataques, golpes de Rufo un 25 % más fuertes; puntos ×0,75), *Normal* y *Difícil* (avisos más cortos, tomates más rápidos; puntos ×1,5).
 - **Opciones:** volumen de música y de efectos por separado, intensidad de la sacudida de cámara (0–100 %), destellos normales o reducidos (sin aberración cromática y con flashes suaves), bloom, vibración del mando, pantalla completa y tutorial. Todo se guarda al momento.
+- **Trucos:** un menú propio con interruptores que se guardan entre partidas:
+
+  | Truco | Efecto |
+  |---|---|
+  | Vidas infinitas | Los golpes no quitan corazones |
+  | Reloj congelado | El tiempo no corre |
+  | Golpe de titán | Rufo hace el triple de daño |
+  | Punto débil gigante | El punto débil se ve y se acierta mucho más fácil |
+  | Esquiva sin espera | La esquiva se recarga casi al instante |
+  | Empezar en el nivel | Del 1 al 16, para practicar contra el verde, el podrido o las cherrys |
+  | Velocidad del juego | 50 %, 75 %, 100 %, 125 % o 150 % |
+  | Rufo cabezón | Cabeza y gorro enormes (solo estético) |
+  | Tomates arcoíris | El tomate cambia de color sin parar (solo estético) |
+
+  Con cualquier truco que no sea estético activo, la partida lleva la marca «TRUCOS» y **la puntuación no entra en la tabla de récords**. La demo siempre juega sin trucos. «Desactivar todos» los apaga de golpe.
 - **Tabla de récords:** los 10 mejores, con iniciales, nivel alcanzado y dificultad. Al terminar una partida que entra en la tabla, escribes tus tres iniciales.
 - **Modo demo:** si nadie toca nada en el título durante 20 segundos, Rufo juega solo. Cualquier tecla vuelve al menú.
 - **Tutorial:** la primera vez, el nivel 1 enseña lo esencial con consejos que aparecen según lo que pasa en pantalla: cómo golpear, cómo esquivar la rodada o el bote, cuándo castigar al tomate aturdido, dónde está el punto débil y cómo trepar. Desaparece al superar el nivel 1 (se puede reactivar en opciones).
@@ -214,7 +229,7 @@ Decisiones clave:
 9. Render del tomate (con horneado en segundo plano)
 10. Render de Rufo
 11. Texto e interfaz
-12. El juego: estados, menús, combate, cherrys, charcos, dibujo y postprocesado
+12. El juego: estados, menús, trucos, combate, cherrys, charcos, dibujo y postprocesado
 13. Arranque, selftest, galería de capturas y bot
 
 ### Pruebas e integración continua
@@ -224,7 +239,7 @@ Decisiones clave:
 - el golpe cargado, la cadena de golpes y que se puede trepar al tomate;
 - que la esquiva atraviesa la rodada y que el chorro bajo se salta;
 - la coraza del tomate verde, los charcos del podrido y las cherrys;
-- el menú, que las opciones y los récords se guardan, y el modo demo;
+- el menú, que las opciones, los trucos y los récords se guardan, que con trucos no se entra en la tabla, y el modo demo;
 - unos segundos de cada tomate especial jugados por un bot, y una partida completa.
 
 GitHub Actions lo ejecuta en cada *push* con Python 3.12 y 3.13, pasa el linter y publica las capturas como artefacto.

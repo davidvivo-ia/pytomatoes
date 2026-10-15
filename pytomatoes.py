@@ -20,7 +20,8 @@ J jab (mantener: golpe cargado) · ↓+J jab bajo · K gancho · ↑+J gancho as
 B bloom · M silencio · F3 depuración.
 
 Menú con dificultad, opciones (volúmenes, sacudida, destellos, vibración…),
-tabla de récords con iniciales, modo demo y tutorial. Tomates especiales:
+trucos (vidas infinitas, reloj congelado, golpe de titán, nivel inicial,
+Rufo cabezón…), tabla de récords con iniciales, modo demo y tutorial. Tomates especiales:
 verde blindado (niveles 4, 8…), podrido (6, 10…) y enjambres de cherrys (7+).
 Configuración, opciones y récords en ~/.tomatoes/.
 
@@ -111,7 +112,33 @@ OPT_DEFAULT: dict = {
     "fullscreen": False,
     "tutorial": True,
 }
-MENU_MAIN = ["JUGAR", "DIFICULTAD", "OPCIONES", "RÉCORDS", "SALIR"]
+MENU_MAIN = ["JUGAR", "DIFICULTAD", "OPCIONES", "TRUCOS", "RÉCORDS", "SALIR"]
+# Trucos: (texto del menú, clave). Con cualquiera activo (salvo los estéticos)
+# la puntuación no entra en la tabla de récords.
+CHEATS = [
+    ("Vidas infinitas", "infinite"),
+    ("Reloj congelado", "freeze"),
+    ("Golpe de titán (daño ×3)", "titan"),
+    ("Punto débil gigante", "bigweak"),
+    ("Esquiva sin espera", "nodash_cd"),
+    ("Empezar en el nivel", "start_level"),
+    ("Velocidad del juego", "speed"),
+    ("Rufo cabezón", "bighead"),
+    ("Tomates arcoíris", "rainbow"),
+]
+CHEAT_DEFAULT: dict = {
+    "infinite": False,
+    "freeze": False,
+    "titan": False,
+    "bigweak": False,
+    "nodash_cd": False,
+    "start_level": 1,
+    "speed": 100,
+    "bighead": False,
+    "rainbow": False,
+}
+COSMETIC_CHEATS = {"bighead", "rainbow"}
+MENU_CHEATS = [c[0] for c in CHEATS] + ["Desactivar todos", "Volver"]
 MENU_OPTIONS = ["Dificultad", "Música", "Efectos", "Sacudida de cámara", "Destellos", "Bloom", "Vibración del mando", "Pantalla completa", "Tutorial", "Volver"]
 DEMO_IDLE = 20.0  # segundos quieto en el título antes del modo demo
 
@@ -703,6 +730,7 @@ class Rufo:
         self.blink_t = 2.0
         self.ghost_t = 0.0
         self.flash = 0.0
+        self.bighead = False
         self.step_t = 0.0
         self.prev = (x, float(FLOOR))
         self.last_sprite: pygame.Surface | None = None
@@ -877,7 +905,7 @@ class Rufo:
             self.dash_dir = mx or self.facing
             self.facing = self.dash_dir
             self.dash_start = g.t
-            self.dash_cd = DASH_CD
+            self.dash_cd = 0.12 if g.cheat("nodash_cd") else DASH_CD
             if not self.on_ground:
                 self.air_dash = False
             self.j_armed = False
@@ -1202,6 +1230,8 @@ class Tomato:
         self.drip_t = 0.0
         self.alive = True
         self.sleeping = False
+        self.big_weak = False
+        self.rainbow = False
         self.prev = (self.x, self.y)
 
     # ── geometría ──────────────────────────────────────────────────────
@@ -2167,6 +2197,7 @@ class TomatoArt:
         self.cache: dict[tuple[int, int, str, int], pygame.Surface] = {}
         self.pending: dict[tuple[int, int, str, int], Future] = {}
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hornea")
+        self.sync_bakes = 0  # veces que hubo que esperar a un horneado (tirón)
 
     def request(self, key: tuple[int, int, str, int]) -> None:
         if key not in self.cache and key not in self.pending:
@@ -2202,6 +2233,7 @@ class TomatoArt:
             return self.cache[min(near, key=lambda k: abs(k[1] - bucket) + abs(k[3] - ripe_q))]
         # Nada parecido (primer fotograma del juego): se hornea aquí mismo, sin esperar a la cola
         fut = self.pending.pop(key)
+        self.sync_bakes += 1
         s = arrays_to_surface(*fut.result()) if fut.done() or not fut.cancel() else bake_tomato(r, bucket, kind, ripe_q / 4)
         self.cache[key] = s
         return s
@@ -2273,7 +2305,8 @@ class TomatoArt:
             u, v = math.cos(a) * 0.86, math.sin(a) * 0.86
             wx, wy = P(u, v)
             pulse = 0.55 + 0.45 * math.sin(t.t * 7)
-            blit_add(layer, glow(34 * k + 10 * pulse, scale_c((255, 170, 60), 0.5 + 0.5 * pulse), 1.6), wx, wy)
+            big = 2.2 if t.big_weak else 1.0
+            blit_add(layer, glow((34 * k + 10 * pulse) * big, scale_c((255, 170, 60), 0.5 + 0.5 * pulse), 1.6), wx, wy)
             blit_add(layer, glow(10 * k + 4, (255, 240, 200), 2.0), wx, wy)
         # Bulto del chorro de jugo
         if t.state == "tele" and t.attack == "jet":
@@ -2289,6 +2322,11 @@ class TomatoArt:
         if t.flash > 0:
             v = int(150 * t.flash)
             layer.fill((v, v, v), special_flags=pygame.BLEND_RGB_ADD)
+        if t.rainbow:
+            h = t.t * 0.6
+            tint = tuple(int(150 + 105 * (0.5 + 0.5 * math.sin(h + o))) for o in (0.0, 2.1, 4.2))
+            layer.fill(tint, special_flags=pygame.BLEND_RGB_MULT)
+            layer.fill(tuple(int(60 * (0.5 + 0.5 * math.sin(h + o))) for o in (3.0, 5.1, 1.0)), special_flags=pygame.BLEND_RGB_ADD)
         if t.fury() and t.state != "dead":
             v = 0.5 + 0.5 * math.sin(t.t * 14)
             layer.fill((int(190 + 50 * v), int(120 + 40 * v), int(130 + 40 * v)), special_flags=pygame.BLEND_RGB_MULT)
@@ -2354,8 +2392,8 @@ def draw_calyx(layer: pygame.Surface, P, rx: float, ry: float, r: int, theta: fl
 # ═══════════════════════════════════════════════════════════════════════════
 
 SS = 2  # supermuestreo
-CANVAS = (190, 180)  # tamaño final del sprite
-ANCHOR = (95, 140)  # pies dentro del sprite
+CANVAS = (190, 220)  # tamaño final del sprite
+ANCHOR = (95, 180)  # pies dentro del sprite
 OUT = (24, 18, 26)
 SKIN = (240, 192, 152)
 JACKET = (244, 242, 236)
@@ -2448,51 +2486,57 @@ class RufoArt:
         for u, v, rad in r.stains:
             pygame.draw.circle(cv, (176, 26, 34), P(u * 12, lerp(body_top + 13, hip_y, v)), rad * SS)
         # Cabeza
-        hc = (2, sh_y - 14)
-        circ(P(*hc), 13, SKIN)
-        pygame.draw.circle(cv, (255, 222, 196), P(hc[0] - 4, hc[1] - 4), 5 * SS)
-        circ(P(hc[0] - 9, hc[1] + 1), 3.6, scale_c(SKIN, 0.9))  # oreja
-        pygame.draw.circle(cv, (245, 140, 130), P(hc[0] + 6, hc[1] + 4), 3 * SS)  # mejilla
+        hs = 1.55 if r.bighead else 1.0  # truco: Rufo cabezón
+        hc = (2, sh_y - 14 - 13 * (hs - 1))
+
+        def Hd(dx, dy):  # punto de la cara, escalado con la cabeza
+            return P(hc[0] + dx * hs, hc[1] + dy * hs)
+
+        circ(P(*hc), 13 * hs, SKIN)
+        pygame.draw.circle(cv, (255, 222, 196), Hd(-4, -4), 5 * SS * hs)
+        circ(Hd(-9, 1), 3.6 * hs, scale_c(SKIN, 0.9))  # oreja
+        pygame.draw.circle(cv, (245, 140, 130), Hd(6, 4), 3 * SS * hs)  # mejilla
         blink = r.blink_t < 0
         for ex in (6.5, 12.0):
-            e = P(hc[0] + ex - 2, hc[1] - 1)
+            e = Hd(ex - 2, -1)
             if blink or r.state == "dead":
                 pygame.draw.line(cv, OUT, (e[0] - 4, e[1]), (e[0] + 4, e[1]), 3)
             else:
-                pygame.draw.ellipse(cv, OUT, (e[0] - 2.4 * SS, e[1] - 3.2 * SS, 4.8 * SS, 6.4 * SS))
-                pygame.draw.circle(cv, WHITE, (e[0] - SS * 0.8 * fc * -1, e[1] - SS * 1.2), SS * 1.0)
+                pygame.draw.ellipse(cv, OUT, (e[0] - 2.4 * SS * hs, e[1] - 3.2 * SS * hs, 4.8 * SS * hs, 6.4 * SS * hs))
+                pygame.draw.circle(cv, WHITE, (e[0] - SS * 0.8 * fc * -1, e[1] - SS * 1.2), SS * hs)
         # Cejas testarudas: bajan hacia la nariz
-        pygame.draw.line(cv, OUT, P(hc[0] + 1.5, hc[1] - 7), P(hc[0] + 7.5, hc[1] - 5), 3 * SS // 2 + 1)
-        pygame.draw.line(cv, OUT, P(hc[0] + 9, hc[1] - 5.5), P(hc[0] + 14, hc[1] - 6.5), 3 * SS // 2 + 1)
-        pygame.draw.circle(cv, scale_c(SKIN, 0.86), P(hc[0] + 13.5, hc[1] + 2), 2.6 * SS)
+        pygame.draw.line(cv, OUT, Hd(1.5, -7), Hd(7.5, -5), 3 * SS // 2 + 1)
+        pygame.draw.line(cv, OUT, Hd(9, -5.5), Hd(14, -6.5), 3 * SS // 2 + 1)
+        pygame.draw.circle(cv, scale_c(SKIN, 0.86), Hd(13.5, 2), 2.6 * SS * hs)
         m = pose["mouth"]
         if m == "o":
-            pygame.draw.circle(cv, OUT, P(hc[0] + 9, hc[1] + 7), 2.3 * SS)
+            pygame.draw.circle(cv, OUT, Hd(9, 7), 2.3 * SS * hs)
         elif m == "grit":
-            pygame.draw.line(cv, OUT, P(hc[0] + 6, hc[1] + 7), P(hc[0] + 12, hc[1] + 7), 4 * SS // 2 + 2)
-            pygame.draw.line(cv, WHITE, P(hc[0] + 7, hc[1] + 7), P(hc[0] + 11, hc[1] + 7), 2)
+            pygame.draw.line(cv, OUT, Hd(6, 7), Hd(12, 7), 4 * SS // 2 + 2)
+            pygame.draw.line(cv, WHITE, Hd(7, 7), Hd(11, 7), 2)
         else:
-            pygame.draw.line(cv, OUT, P(hc[0] + 7, hc[1] + 7.5), P(hc[0] + 12, hc[1] + 6.8), 3)
+            pygame.draw.line(cv, OUT, Hd(7, 7.5), Hd(12, 6.8), 3)
         # Gorro de chef demasiado alto (con su propio muelle)
-        hb = (hc[0], hc[1] - 11)
+        hb = (hc[0], hc[1] - 11 * hs)
         hang = r.hat.x * fc
 
         c2, s2 = math.cos(hang), math.sin(hang)
 
         def Q(x, y):  # desplazamiento relativo a la base del gorro
+            x, y = x * hs, y * hs
             return P(hb[0] + x * c2 - y * s2, hb[1] + x * s2 + y * c2)
 
         col = [Q(-12, -2), Q(-15, -38), Q(15, -38), Q(12, -2)]
         pygame.draw.polygon(cv, OUT, col, 6)
         pygame.draw.polygon(cv, (250, 250, 252), col)
         for px_, py_, pr in ((-9, -38, 9.5), (0, -42, 10.5), (9, -38, 9.5)):
-            circ(Q(px_, py_), pr, (250, 250, 252))
+            circ(Q(px_, py_), pr * hs, (250, 250, 252))
         for px_, py_, pr in ((-9, -38, 9.5), (0, -42, 10.5), (9, -38, 9.5)):
-            pygame.draw.circle(cv, (250, 250, 252), Q(px_, py_ + 3), pr * SS)
+            pygame.draw.circle(cv, (250, 250, 252), Q(px_, py_ + 3), pr * SS * hs)
         pygame.draw.polygon(cv, (250, 250, 252), [Q(-13, -3), Q(-15, -38), Q(15, -38), Q(13, -3)])
         pygame.draw.line(cv, (214, 214, 226), Q(-5, -5), Q(-6, -34), 2 * SS)
         pygame.draw.line(cv, (214, 214, 226), Q(5, -5), Q(6, -34), 2 * SS)
-        pygame.draw.circle(cv, WHITE, Q(-4, -45), 4 * SS)
+        pygame.draw.circle(cv, WHITE, Q(-4, -45), 4 * SS * hs)
         band = [Q(-13, -1), Q(13, -1), Q(13, -8), Q(-13, -8)]
         pygame.draw.polygon(cv, OUT, band, 5)
         pygame.draw.polygon(cv, (232, 232, 240), band)
@@ -2687,6 +2731,8 @@ class Game:
         self.banner: tuple[str, str, float, float] | None = None
         self.combo_pop: tuple[str, float] | None = None
         self.opts: dict = dict(OPT_DEFAULT) | (opts or {})
+        self.cheats: dict = dict(CHEAT_DEFAULT) | (self.opts.get("cheats") or {})
+        self.cheated = False  # la partida actual usó trucos
         self.diff_name = self.opts["difficulty"] if self.opts["difficulty"] in DIFFICULTY else "Normal"
         self.bloom = self.opts["bloom"]
         audio.set_volumes(self.opts["music"], self.opts["sfx"])
@@ -2724,6 +2770,7 @@ class Game:
         self.fx.clear()
         self.scene.reset()
         self.rufo = Rufo(590)
+        self.rufo.bighead = self.cheats["bighead"]
         self.tomato: Tomato | None = Tomato(1, x=940)
         self.tomato.sleeping = True
         self.tomato.state = "idle"
@@ -2735,8 +2782,9 @@ class Game:
         self.cherries.clear()
         self.puddles.clear()
 
-    def new_game(self) -> None:
+    def new_game(self, demo: bool = False) -> None:
         self.state = "play"
+        self.demo = demo  # en la demo no hay trucos
         self.sub = "fight"
         self.sub_t = 0.0
         self.fx.clear()
@@ -2746,10 +2794,13 @@ class Game:
         self.score = 0
         self.combo = 0
         self.last_hit = -9.0
-        self.level = 1
+        self.level = self.cheat("start_level")
+        self.cheated = not demo and self.cheats_on()
         self.stats = {"tomatoes": 0, "max_combo": 0, "crits": 0, "perfect": 0}
         self.rufo = Rufo(300)
-        self.tomato = Tomato(1, diff=self.diff())
+        self.rufo.bighead = self.cheat("bighead")
+        self.tomato = Tomato(self.level, diff=self.diff())
+        self.dress(self.tomato)
         self.tart.warm(self.tomato)
         self.jets.clear()
         self.seeds.clear()
@@ -2763,12 +2814,11 @@ class Game:
         self.flash = self.red = self.trauma = self.zoom_t = self.ab_t = 0.0
         self.combo_pop = None
         self.new_record = False
-        self.demo = False
         self.entering = False
         self.tip = None
         self.tips_seen = set()
         self.shown_score = 0.0
-        self.show_banner("NIVEL 1", "¡Revienta el tomate!", 1.6)
+        self.show_banner(f"NIVEL {self.level}", "Con trucos: la puntuación no entra en la tabla" if self.cheated else "¡Revienta el tomate!", 1.8)
         self.audio.play("select")
 
     def game_over(self) -> None:
@@ -2780,14 +2830,14 @@ class Game:
         self.over_t = 0.0
         self.inp.virtual = set()
         self.new_record = self.score > self.best
-        self.entering = self.score > 0 and (len(self.top) < 10 or self.score > self.top[-1]["score"])
+        self.entering = not self.cheated and self.score > 0 and (len(self.top) < 10 or self.score > self.top[-1]["score"])
+        self.new_record = self.new_record and not self.cheated
         self.name, self.name_i = list(self.opts.get("last_name", "AAA")[:3].ljust(3, "A")), 0
         self.audio.play("over")
 
     def start_demo(self) -> None:
-        """Modo demo: el bot juega solo hasta que alguien toque algo."""
-        self.new_game()
-        self.demo = True
+        """Modo demo: el bot juega solo hasta que alguien toque algo (sin trucos)."""
+        self.new_game(demo=True)
         self.bot = Bot()
         self.show_banner("DEMO", "Pulsa cualquier tecla", 2.0)
 
@@ -2806,7 +2856,43 @@ class Game:
         self.audio.play("level")
 
     def save_opts(self) -> None:
+        self.opts["cheats"] = dict(self.cheats)
         save_json(CFG_DIR / "config.json", {"keys": self.keymap, "options": self.opts})
+
+    def cheat(self, key: str):
+        """Valor de un truco; en la demo no hay trucos."""
+        return CHEAT_DEFAULT[key] if self.demo else self.cheats[key]
+
+    def dress(self, t: "Tomato") -> None:
+        t.big_weak = self.cheat("bigweak")
+        t.rainbow = self.cheat("rainbow")
+
+    def cheats_on(self) -> bool:
+        return any(self.cheats[k] != CHEAT_DEFAULT[k] for k in self.cheats if k not in COSMETIC_CHEATS)
+
+    def cheat_value(self, label: str) -> str:
+        key = dict(CHEATS).get(label)
+        if key is None:
+            return ""
+        v = self.cheats[key]
+        if key == "start_level":
+            return f"{v}  ({KIND_NAMES[tomato_kind(v)].lower()})"
+        if key == "speed":
+            return f"{v} %"
+        return "Sí" if v else "No"
+
+    def change_cheat(self, label: str, d: int) -> None:
+        key = dict(CHEATS)[label]
+        c = self.cheats
+        if key == "start_level":
+            c[key] = int(clamp(c[key] + d, 1, 16))
+        elif key == "speed":
+            steps = [50, 75, 100, 125, 150]
+            c[key] = steps[int(clamp(steps.index(c[key]) + d if c[key] in steps else 2, 0, len(steps) - 1))]
+        else:
+            c[key] = not c[key]
+        self.audio.play("ready" if c[key] else "select")
+        self.save_opts()
 
     # ── menús ───────────────────────────────────────────────────────────
     def option_value(self, item: str) -> str:
@@ -2822,7 +2908,7 @@ class Game:
             "Vibración del mando": "Sí" if o["rumble"] else "No",
             "Pantalla completa": "Sí" if o["fullscreen"] else "No",
             "Tutorial": "Sí" if o["tutorial"] else "No",
-        }.get(item, "")
+        }.get(item, "") or self.cheat_value(item)
 
     def change_option(self, item: str, d: int) -> None:
         o = self.opts
@@ -2851,16 +2937,21 @@ class Game:
                 pass
         elif item == "Tutorial":
             o["tutorial"] = not o["tutorial"]
+        elif item in dict(CHEATS):
+            self.change_cheat(item, d)
+            if self.state == "title":
+                self.rufo.bighead = self.cheats["bighead"]
+            return
         self.audio.play("select")
         self.save_opts()
 
     def menu_input(self, acts: list[str]) -> None:
         if self.menu == "records":
             if "confirm" in acts or "pause" in acts:
-                self.menu, self.cursor = "main", 3
+                self.menu, self.cursor = "main", MENU_MAIN.index("RÉCORDS")
                 self.audio.play("select")
             return
-        items = MENU_MAIN if self.menu == "main" else MENU_OPTIONS
+        items = {"main": MENU_MAIN, "options": MENU_OPTIONS, "cheats": MENU_CHEATS}[self.menu]
         if "up" in acts:
             self.cursor = (self.cursor - 1) % len(items)
             self.audio.play("select", 0.5)
@@ -2877,19 +2968,27 @@ class Game:
             elif item == "OPCIONES":
                 self.menu, self.cursor = "options", 0
                 self.audio.play("select")
+            elif item == "TRUCOS":
+                self.menu, self.cursor = "cheats", 0
+                self.audio.play("select")
+            elif item == "Desactivar todos":
+                self.cheats = dict(CHEAT_DEFAULT)
+                self.rufo.bighead = False
+                self.save_opts()
+                self.audio.play("select")
             elif item == "RÉCORDS":
                 self.menu = "records"
                 self.audio.play("select")
             elif item == "SALIR":
                 self.running = False
             elif item == "Volver":
-                self.menu, self.cursor = "main", 2
+                self.menu, self.cursor = "main", MENU_MAIN.index("TRUCOS" if self.menu == "cheats" else "OPCIONES")
                 self.audio.play("select")
             else:
                 self.change_option(item, 1)
         elif "pause" in acts:
-            if self.menu == "options":
-                self.menu, self.cursor = "main", 2
+            if self.menu in ("options", "cheats"):
+                self.menu, self.cursor = "main", MENU_MAIN.index("TRUCOS" if self.menu == "cheats" else "OPCIONES")
             else:
                 self.running = False
 
@@ -3064,7 +3163,7 @@ class Game:
         if self.slow_t > 0:
             self.slow_t -= dt
             k = self.slow_k
-        self.acc += dt * k
+        self.acc += dt * k * self.cheat("speed") / 100
         while self.acc >= DT:
             self.acc -= DT
             self.step(DT)
@@ -3108,7 +3207,7 @@ class Game:
         self.sub_t += dt
         self.tutorial()
         # Reloj (congelado mientras entra un tomate o revienta)
-        if self.sub == "fight" and t is not None and t.state != "intro":
+        if self.sub == "fight" and t is not None and t.state != "intro" and not self.cheat("freeze"):
             before = self.time_left
             self.time_left -= dt
             if self.time_left < 10 and math.ceil(self.time_left) != math.ceil(before) and self.time_left > 0:
@@ -3146,6 +3245,7 @@ class Game:
         if self.sub == "burst" and self.sub_t > 2.2:
             self.level += 1
             self.tomato = Tomato(self.level, x=clamp(W - r.x, 420, 860), diff=self.diff())
+            self.dress(self.tomato)
             self.tart.warm(self.tomato)
             self.sub, self.sub_t = "fight", 0.0
             if self.level == 2 and self.opts["tutorial"] and not self.demo:
@@ -3247,9 +3347,10 @@ class Game:
         ang = math.atan2((by - t.y) / ry, (bx - t.x) / rx)
         hx, hy = t.x + math.cos(ang) * rx, t.y + math.sin(ang) * ry
         wx, wy = t.weak_pos()
-        crit = box.inflate(52, 52).collidepoint(wx, wy)
+        reach = 150 if self.cheat("bigweak") else 52
+        crit = box.inflate(reach, reach).collidepoint(wx, wy)
         stunned = t.state == "stun"
-        dmg = max(1, round(r.atk_dmg * (2 if crit else 1) * self.diff()["dmg"]))
+        dmg = max(1, round(r.atk_dmg * (2 if crit else 1) * self.diff()["dmg"] * (3 if self.cheat("titan") else 1)))
         dmg, event = t.take_hit(ang, dmg, a["knock"], crit, heavy=r.atk != "jab")
         # Puntuación y combo
         base = 15 * r.atk_dmg if r.atk == "charge" else a["pts"]
@@ -3453,7 +3554,8 @@ class Game:
 
     def hurt_rufo(self, from_x: float, juice: bool = False) -> None:
         r = self.rufo
-        self.hearts -= 1
+        if not self.cheat("infinite"):
+            self.hearts -= 1
         self.combo = 0
         r.inv = INV_HURT
         r.state = "hurt"
@@ -3931,6 +4033,9 @@ class Game:
         for i in range(MAX_HEARTS):
             draw_heart(scr, 70 + i * 46, 48, 17, i < self.hearts, 0.08 * math.sin(self.real_t * 8) if i == self.hearts - 1 and self.hearts == 1 else 0)
         scr.blit(txt.outlined(f"{int(self.shown_score):,}".replace(",", " "), 40, WHITE), (50, 76))
+        if self.cheated and not self.demo:
+            badge = txt.outlined("TRUCOS", 20, (255, 150, 60))
+            scr.blit(badge, (196, 52))
         if self.combo > 1:
             mult = min(5.0, 1 + 0.1 * (self.combo - 1))
             img = txt.outlined(f"COMBO {self.combo}  ×{mult:.1f}", 28, (255, 210, 90))
@@ -4010,13 +4115,19 @@ class Game:
         tag = self.txt.outlined("Un tomate del tamaño de una casa. Un cocinero diminuto con guantes de boxeo. Noventa segundos.", 26, (235, 225, 215))
         blit_center(scr, tag, W / 2, 250)
         if self.menu == "main":
-            self.draw_menu(scr, MENU_MAIN, 70, 296, 430, 44, 40)
+            self.draw_menu(scr, MENU_MAIN, 70, 290, 430, 40, 38)
+            if self.cheats_on():
+                scr.blit(self.txt.outlined("trucos activos", 20, (255, 150, 60)), (300, 290 + 12 + 3 * 40 + 9))
             best = self.top[0] if self.top else None
             if best:
                 rec = f"Récord: {best['score']:,}".replace(",", " ") + f"  ·  {best['name']}"
                 blit_center(scr, self.txt.outlined(rec, 26, (255, 220, 140)), 285, 545)
         elif self.menu == "options":
             self.draw_menu(scr, MENU_OPTIONS, W / 2 - 330, 284, 660, 34, 30, values=True)
+        elif self.menu == "cheats":
+            self.draw_menu(scr, MENU_CHEATS, W / 2 - 330, 262, 660, 33, 30, values=True)
+            note = "Con trucos la puntuación no entra en la tabla (cabezón y arcoíris son solo estéticos)"
+            blit_center(scr, self.txt.outlined(note, 20, (255, 170, 100)), W / 2, 262 + 33 * len(MENU_CHEATS) + 40)
         else:
             self.draw_records(scr)
         hint = "W/S o flechas: elegir  ·  A/D: cambiar  ·  J/Espacio/Intro: aceptar  ·  Esc: volver"
@@ -4098,6 +4209,8 @@ class Game:
             col = (255, 220, 100) if (i == 1 and self.new_record) else WHITE
             v = self.txt.plain(b, 34, col)
             scr.blit(v, (W / 2 + 230 - v.get_width(), yy))
+        if self.cheated:
+            blit_center(scr, self.txt.outlined("Partida con trucos: no entra en la tabla", 26, (255, 160, 90)), W / 2, y + ch - 80)
         if self.entering:
             blit_center(scr, self.txt.outlined("¡ENTRAS EN LA TABLA! Tus iniciales:", 28, (255, 220, 120)), W / 2, y + ch - 112)
             for i, ch_ in enumerate(self.name):
@@ -4133,6 +4246,8 @@ def load_config() -> tuple[dict[str, list[str]], dict]:
                 opts[k] = v
             elif k == "last_name" and isinstance(v, str):
                 opts[k] = v
+            elif k == "cheats" and isinstance(v, dict):
+                opts[k] = {ck: cv for ck, cv in v.items() if ck in CHEAT_DEFAULT and type(cv) is type(CHEAT_DEFAULT[ck])}
     if opts["difficulty"] not in DIFFICULTY:
         opts["difficulty"] = "Normal"
     save_json(path, {"keys": keys, "options": opts})
@@ -4246,6 +4361,7 @@ def run_headless(seconds: float, shots: Path | None = None) -> dict:
     g.draw()
     shot("01_titulo")
     g.new_game()
+    g.tart.sync_bakes = 0
     bot = Bot()
     frame = 0
     draw_ms = []
@@ -4298,6 +4414,7 @@ def run_headless(seconds: float, shots: Path | None = None) -> dict:
         "draw_ms_avg": sum(draw_ms) / max(1, len(draw_ms)),
         "draw_ms_p95": sorted(draw_ms)[int(len(draw_ms) * 0.95)] if draw_ms else 0,
         "draw_ms_max": max(draw_ms, default=0),
+        "sync_bakes": g.tart.sync_bakes,
         "shots": taken,
         "audio": audio.ok,
         "state": g.state,
@@ -4460,6 +4577,33 @@ def mechanics(check) -> None:
     g.name_input(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r", mod=0, scancode=0), [])
     top = load_records()
     check(bool(top) and top[0]["name"] == "ABC" and top[0]["score"] == 1234, "la tabla de récords se guarda con iniciales")
+    # Trucos
+    g.to_title()
+    for _ in range(MENU_MAIN.index("TRUCOS") - g.cursor):
+        g.menu_input(["down"])
+    g.menu_input(["confirm"])
+    check(g.menu == "cheats", "el menú principal abre los trucos")
+    g.menu_input(["confirm"])  # vidas infinitas
+    for _ in range(5):
+        g.menu_input(["down"])
+    g.menu_input(["right"])
+    g.menu_input(["right"])  # empezar en el nivel 3
+    check(g.cheats["infinite"] and g.cheats["start_level"] == 3, "los trucos se activan desde el menú")
+    check(load_config()[1]["cheats"]["start_level"] == 3, "los trucos se guardan")
+    g.new_game()
+    check(g.level == 3 and g.tomato.level == 3 and g.cheated, "«empezar en el nivel» arranca en el nivel elegido")
+    g.hurt_rufo(g.rufo.x + 50)
+    check(g.hearts == MAX_HEARTS, "con vidas infinitas un golpe no quita corazón")
+    g.score = 99999
+    g.game_over()
+    check(not g.entering and load_records()[0]["score"] != 99999, "con trucos la puntuación no entra en la tabla")
+    g.to_title()
+    g.start_demo()
+    check(g.level == 1 and not g.cheated, "la demo juega sin trucos")
+    g.to_title()
+    g.menu, g.cursor = "cheats", MENU_CHEATS.index("Desactivar todos")
+    g.menu_input(["confirm"])
+    check(not g.cheats_on(), "«Desactivar todos» los apaga")
     # Modo demo
     g.to_title()
     g.idle_t = DEMO_IDLE + 1
@@ -4577,7 +4721,7 @@ def selftest() -> int:
     check(res["tomatoes"] >= 1, "el bot revienta al menos un tomate")
     check(res["state"] == "over", "la partida termina en la pantalla final")
     check(res["draw_ms_avg"] < 60, "render por debajo de 60 ms por fotograma (CPU, sin GPU)")
-    check(res["draw_ms_max"] < 100, "sin tirones: el tomate se hornea en segundo plano")
+    check(res["sync_bakes"] == 0, "sin tirones: ningún horneado del tomate bloquea la partida")
     print("RESULTADO:", "OK" if ok else "FALLO")
     return 0 if ok else 1
 
