@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Dependencias
+        run: pip install pygame-ce numpy ruff
+      - name: Lint
+        run: ruff check --select E,F,W,B --ignore E501,E731,B023,B007 pytomatoes.py
+      - name: Selftest (mecánicas + partida completa con bot)
+        run: python pytomatoes.py --selftest
+      - name: Capturas
+        run: python pytomatoes.py --shots capturas
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capturas-py${{ matrix.python }}
+          path: capturas/

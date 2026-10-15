@@ -15,9 +15,14 @@ externos: gráficos, luces, partículas, música y efectos se generan por códig
     python pytomatoes.py --shots DIR   # capturas PNG de cada pantalla (CI)
 
 Controles: A/D o ←/→ moverse · W/↑/Espacio saltar (doble salto) · S/↓ agacharse
-J jab (mantener: golpe cargado) · K gancho · ↑+J gancho ascendente
+J jab (mantener: golpe cargado) · ↓+J jab bajo · K gancho · ↑+J gancho ascendente
 ↓+J en el aire: martillo · Shift/L esquiva · P/Esc pausa · F11 pantalla completa
-B bloom · M silencio · F3 depuración.  Configuración y récord en ~/.tomatoes/.
+B bloom · M silencio · F3 depuración.
+
+Menú con dificultad, opciones (volúmenes, sacudida, destellos, vibración…),
+tabla de récords con iniciales, modo demo y tutorial. Tomates especiales:
+verde blindado (niveles 4, 8…), podrido (6, 10…) y enjambres de cherrys (7+).
+Configuración, opciones y récords en ~/.tomatoes/.
 
 Licencia MIT.
 """
@@ -32,6 +37,7 @@ import random
 import sys
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -81,7 +87,46 @@ ATTACKS: dict[str, dict] = {
 
 # Tomate
 TOMATO_ASPECT = 0.9  # ligeramente achatado
-TELE = {"roll": 0.6, "bounce": 0.35, "jet": 0.5, "seeds": 0.7}
+TELE = {"roll": 0.6, "bounce": 0.35, "jet": 0.5, "seeds": 0.7, "cherry": 0.6}
+CHERRY_R = 17
+KIND_NAMES = {"roja": "TOMATE", "verde": "TOMATE VERDE BLINDADO", "podrida": "TOMATE PODRIDO"}
+ROT_JUICE = (118, 74, 26)
+
+# Dificultad: tiempos de aviso, pausas, velocidad, daño de Rufo y puntuación
+DIFFICULTY: dict[str, dict[str, float]] = {
+    "Fácil": dict(tele=1.3, pause=1.35, speed=0.85, dmg=1.25, score=0.75),
+    "Normal": dict(tele=1.0, pause=1.0, speed=1.0, dmg=1.0, score=1.0),
+    "Difícil": dict(tele=0.85, pause=0.8, speed=1.12, dmg=1.0, score=1.5),
+}
+DIFF_ORDER = ["Fácil", "Normal", "Difícil"]
+
+OPT_DEFAULT: dict = {
+    "difficulty": "Normal",
+    "music": 7,
+    "sfx": 8,
+    "shake": 100,
+    "flashes": True,
+    "bloom": True,
+    "rumble": True,
+    "fullscreen": False,
+    "tutorial": True,
+}
+MENU_MAIN = ["JUGAR", "DIFICULTAD", "OPCIONES", "RÉCORDS", "SALIR"]
+MENU_OPTIONS = ["Dificultad", "Música", "Efectos", "Sacudida de cámara", "Destellos", "Bloom", "Vibración del mando", "Pantalla completa", "Tutorial", "Volver"]
+DEMO_IDLE = 20.0  # segundos quieto en el título antes del modo demo
+
+
+def tomato_radius(level: int) -> int:
+    return min(220 + 12 * (level - 1), 320)
+
+
+def tomato_kind(level: int) -> str:
+    """Cada cuatro niveles, un tomate especial."""
+    if level % 4 == 0:
+        return "verde"
+    if level >= 6 and level % 4 == 2:
+        return "podrida"
+    return "roja"
 STUN_T = 0.8
 HOVER_T = 0.8  # la sombra avisa del bote durante este tiempo
 
@@ -283,6 +328,8 @@ class Audio:
     def __init__(self, enabled: bool = True):
         self.ok = False
         self.muted = False
+        self.vol_music = 0.7
+        self.vol_sfx = 0.8
         self.snd: dict[str, pygame.mixer.Sound] = {}
         self.music: pygame.mixer.Sound | None = None
         self.music_ch: pygame.mixer.Channel | None = None
@@ -359,6 +406,14 @@ class Audio:
                 filt(noise(d), hi=body) * env(d, decay * 1.5) * 0.6,
             )
 
+        def chime(freqs, step, d=0.35, wave="tri"):
+            out = np.zeros(int(sr * (step * len(freqs) + d)))
+            for i, f in enumerate(freqs):
+                n = sweep(f, f * 1.001, d, wave) * env(d, 9)
+                st = int(i * step * sr)
+                out[st : st + len(n)] += n
+            return out
+
         s = self.snd
         s["jab"] = self._mk(thud(190, 70, 0.14, 32), 0.55)
         s["hook"] = self._mk(thud(150, 48, 0.22, 18, 0.5, 800), 0.7)
@@ -400,14 +455,6 @@ class Audio:
         s["burst"] = self._mk(add(sweep(95, 24, 1.6) * env(1.6, 2.6) * 1.2, burst_bub, filt(noise(0.2), hi=1200) * env(0.2, 12)), 1.0)
         s["tick"] = self._mk(np.sin(2 * np.pi * 1250 * T(0.045)) * env(0.045, 70), 0.35)
 
-        def chime(freqs, step, d=0.35, wave="tri"):
-            out = np.zeros(int(sr * (step * len(freqs) + d)))
-            for i, f in enumerate(freqs):
-                n = sweep(f, f * 1.001, d, wave) * env(d, 9)
-                st = int(i * step * sr)
-                out[st : st + len(n)] += n
-            return out
-
         s["perfect"] = self._mk(chime([880, 1320, 1760, 2640], 0.045), 0.45)
         s["level"] = self._mk(chime([523, 659, 784, 1047, 1319], 0.08, 0.5), 0.5)
         s["select"] = self._mk(chime([660, 990], 0.05, 0.12), 0.35)
@@ -416,6 +463,16 @@ class Audio:
         s["seed_hit"] = self._mk(sweep(1400, 700, 0.05) * env(0.05, 60), 0.3)
         s["over"] = self._mk(chime([523, 415, 330, 262], 0.16, 0.6), 0.5)
         s["wall"] = self._mk(thud(110, 40, 0.3, 12, 0.3, 400), 0.7)
+        pop = add(sweep(260, 950, 0.07, "tri") * env(0.07, 40), filt(noise(0.05), lo=1500) * env(0.05, 120) * 0.5)
+        s["pop"] = self._mk(pop, 0.45)
+        trio = np.zeros(int(sr * 0.6))
+        for i in range(3):
+            st = int(i * 0.17 * sr)
+            trio[st : st + len(pop)] += pop
+        s["warn_cherry"] = self._mk(trio, 0.5)
+        ring = sum(np.sin(2 * np.pi * f * T(0.5)) * np.exp(-T(0.5) * d) for f, d in ((1840, 9), (2710, 12), (4130, 16)))
+        s["clonk"] = self._mk(add(thud(220, 90, 0.12, 30, 0.8), ring * 0.5), 0.6)
+        s["ripe"] = self._mk(add(chime([523, 784, 1047, 1568], 0.06, 0.6), sweep(200, 900, 0.5) * env(0.5, 4) * 0.3), 0.6)
         self.music = self._mk(self._compose(), 0.55)
 
     def _compose(self) -> np.ndarray:
@@ -479,24 +536,27 @@ class Audio:
         if snd is not None:
             ch = snd.play()
             if ch is not None:
-                ch.set_volume(vol)
+                ch.set_volume(min(1.0, vol) * self.vol_sfx)
 
     def start_music(self) -> None:
         if not self.ok or self.music is None:
             return
         self.music_ch = pygame.mixer.Channel(0)
         self.music_ch.play(self.music, loops=-1)
-        self.music_ch.set_volume(0.0 if self.muted else 0.33)
+        self.music_ch.set_volume(0.0 if self.muted else 0.47 * self.vol_music)
+
+    def set_volumes(self, music: int, sfx: int) -> None:
+        self.vol_music, self.vol_sfx = clamp(music / 10, 0, 1), clamp(sfx / 10, 0, 1)
+        if self.ok and self.music_ch is not None:
+            self.music_ch.set_volume(0.0 if self.muted else 0.47 * self.vol_music)
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted
         if self.ok:
             if self.muted:
                 pygame.mixer.stop()
-            if self.music_ch is not None:
-                self.music_ch.set_volume(0.0 if self.muted else 0.33)
-                if not self.muted:
-                    self.start_music()
+            if not self.muted:
+                self.start_music()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -566,9 +626,28 @@ class Input:
         elif e.type == pygame.JOYBUTTONUP:
             self.pad_buttons.discard(e.button)
         elif e.type == pygame.JOYAXISMOTION and e.axis in (0, 1):
+            old = self.pad_axes[e.axis]
             self.pad_axes[e.axis] = e.value
+            neg, pos = ("left", "right") if e.axis == 0 else ("up", "down")
+            out = []
+            if e.value < -0.6 <= old:
+                out.append(neg)
+            if e.value > 0.6 >= old:
+                out.append(pos)
+            return out
         elif e.type == pygame.JOYHATMOTION and e.hat == 0:
+            (ox, oy), (hx, hy) = self.pad_hat, e.value
             self.pad_hat = e.value
+            out = []
+            if hx < 0 <= ox:
+                out.append("left")
+            if hx > 0 >= ox:
+                out.append("right")
+            if hy > 0 >= oy:
+                out.append("up")
+            if hy < 0 <= oy:
+                out.append("down")
+            return out
         return []
 
     def clear(self) -> None:
@@ -598,6 +677,7 @@ class Rufo:
         self.atk_hit = False
         self.atk_dmg = 0
         self.atk_fired = False
+        self.atk_low = False
         self.chain = 0
         self.chain_t = 0.0
         self.j_armed = False
@@ -622,6 +702,9 @@ class Rufo:
         self.stains: list[tuple[float, float, float]] = []
         self.blink_t = 2.0
         self.ghost_t = 0.0
+        self.flash = 0.0
+        self.step_t = 0.0
+        self.prev = (x, float(FLOOR))
         self.last_sprite: pygame.Surface | None = None
 
     # ── consultas ───────────────────────────────────────────────────────
@@ -645,9 +728,15 @@ class Rufo:
         return "end", 1.0
 
     def hitbox(self) -> pygame.Rect | None:
-        if self.state != "attack" or self.phase()[0] != "ac" or self.atk_hit:
+        return None if self.atk_hit else self.active_box()
+
+    def active_box(self) -> pygame.Rect | None:
+        """Caja del golpe activo (aunque ya haya conectado con el tomate)."""
+        if self.state != "attack" or self.phase()[0] != "ac":
             return None
         x0, y0, x1, y1 = ATTACKS[self.atk]["box"]
+        if self.atk_low:  # jab agachado: barre a ras de suelo
+            y0, y1 = -34, -4
         if self.facing < 0:
             x0, x1 = -x1, -x0
         return pygame.Rect(int(self.x + x0), int(self.y + y0), x1 - x0, y1 - y0)
@@ -669,6 +758,7 @@ class Rufo:
         self.atk_t = 0.0
         self.atk_hit = False
         self.atk_fired = False
+        self.atk_low = name == "jab" and self.crouch
         self.trail.clear()
         if name == "charge":
             self.atk_dmg = 3 + round(3 * clamp((self.j_hold - 0.4) / 0.8, 0, 1))
@@ -723,6 +813,7 @@ class Rufo:
         self.inv = max(0.0, self.inv - dt)
         self.slow = max(0.0, self.slow - dt)
         self.juice = max(0.0, self.juice - dt)
+        self.flash = max(0.0, self.flash - dt * 5)
         self.chain_t = max(0.0, self.chain_t - dt)
         self.cr.step(dt)
         self.sq.step(dt)
@@ -773,7 +864,7 @@ class Rufo:
 
         free = self.state in ("normal", "charge")
         in_rc = self.state == "attack" and self.phase()[0] == "rc"
-        self.crouch = down and self.on_ground and self.state in ("normal", "charge")
+        self.crouch = down and self.on_ground and (self.state in ("normal", "charge") or (self.state == "attack" and self.atk_low))
         self.cr.target = 1.0 if self.crouch else 0.0
         if free and mx:
             self.facing = mx
@@ -861,7 +952,7 @@ class Rufo:
                     elif self.atk == "charge":
                         self.vx += self.facing * 260
                 if self.on_ground:
-                    self.vx = approach(self.vx, 0, DEC_GROUND * 0.6 * dt)
+                    self.vx = approach(self.vx, 0, DEC_GROUND * 0.6 * dt * (0.08 if g.slipping else 1.0))
                 else:
                     self.vx = approach(self.vx, mx * RUN_MAX * 0.6, ACC_AIR * 0.5 * dt)
                 if ph in ("ac", "rc"):
@@ -882,6 +973,8 @@ class Rufo:
                 target = mx * maxs
                 if self.on_ground:
                     acc = ACC_GROUND if (mx and sign(self.vx) in (0, mx)) else DEC_GROUND
+                    if g.slipping:
+                        acc *= 0.1  # charco del tomate podrido
                 else:
                     acc = ACC_AIR
                 self.vx = approach(self.vx, target, acc * dt)
@@ -897,6 +990,11 @@ class Rufo:
 
         if self.on_ground and abs(self.vx) > 20:
             self.run_phase += abs(self.vx) * dt * 0.045
+            # Polvo de pisadas
+            self.step_t += abs(self.vx) * dt
+            if self.step_t > 70 and not self.on_tomato:
+                self.step_t = 0.0
+                g.fx.p.append([PUFF, self.x - self.facing * 8, self.y - 2, -self.vx * 0.15, -20, 0.35, 0.35, 5, (130, 120, 115), 0])
         while len(self.trail) > 10:
             self.trail.pop(0)
         self._integrate(g, dt)
@@ -973,6 +1071,8 @@ def glove_pose(r: Rufo) -> dict:
             "charge": ((-18, -4), (62, -6), None, "b"),
             "hammer": ((0, -42), (16, 30), (22, -14), "both"),
         }[k]
+        if r.atk_low:
+            wind, ext = (9, 6), (46, 20)
         guard = gf if arm == "f" else gb
         if ph == "su":
             pos = lerp2(guard, wind, ease_out(p))
@@ -1063,15 +1163,21 @@ class Crack:
 class Tomato:
     uid_counter = 0
 
-    def __init__(self, level: int, x: float = W * 0.62):
+    def __init__(self, level: int, x: float = W * 0.62, diff: dict[str, float] | None = None):
         Tomato.uid_counter += 1
         self.uid = Tomato.uid_counter
         self.level = level
-        self.r = min(220 + 12 * (level - 1), 320)
+        self.diff = diff or DIFFICULTY["Normal"]
+        self.kind = tomato_kind(level)
+        self.r = tomato_radius(level)
         self.maxhp = self.hp = 30 + 10 * (level - 1)
         self.hp_trail = float(self.hp)
-        self.pause = max(3.0 - 0.25 * (level - 1), 1.2)
-        self.attacks = ["roll", "bounce"] + (["jet"] if level >= 3 else []) + (["seeds"] if level >= 5 else [])
+        self.pause = max(3.0 - 0.25 * (level - 1), 1.2) * self.diff["pause"]
+        self.attacks = ["roll", "bounce"] + (["jet"] if level >= 3 else []) + (["seeds"] if level >= 5 else []) + (["cherry"] if level >= 7 else [])
+        # Tomate verde: coraza que hay que romper (madurar) con golpes fuertes
+        self.max_armor = self.armor = float(10 + 2 * level) if self.kind == "verde" else 0.0
+        self.ripe = 0.0 if self.kind == "verde" else 1.0
+        self.puddle_t = 0.0
         self.x = x
         self.y = -self.r * 2.2
         self.vx = self.vy = 0.0
@@ -1096,6 +1202,7 @@ class Tomato:
         self.drip_t = 0.0
         self.alive = True
         self.sleeping = False
+        self.prev = (self.x, self.y)
 
     # ── geometría ──────────────────────────────────────────────────────
     def scale(self) -> tuple[float, float]:
@@ -1108,6 +1215,15 @@ class Tomato:
 
     def fury(self) -> bool:
         return self.hp <= self.maxhp * 0.25
+
+    def tele(self, attack: str) -> float:
+        return TELE[attack] * self.diff["tele"] * (0.85 if self.fury_chain else 1.0)
+
+    def juice(self) -> tuple[int, int, int]:
+        return ROT_JUICE if self.kind == "podrida" else JUICE
+
+    def art_key(self) -> tuple[str, int]:
+        return self.kind, round(self.ripe * 4)
 
     def bucket(self) -> int:
         f = self.hp / self.maxhp
@@ -1126,7 +1242,7 @@ class Tomato:
 
     def grounded(self) -> bool:
         return self.state in ("idle", "stun", "tele") or (
-            self.state == "atk" and self.attack in ("roll", "jet", "seeds") or (self.attack == "bounce" and self.phase == "land")
+            self.state == "atk" and self.attack in ("roll", "jet", "seeds", "cherry") or (self.attack == "bounce" and self.phase == "land")
         )
 
     def body_dangerous(self) -> bool:
@@ -1137,7 +1253,17 @@ class Tomato:
         return self.attack == "bounce" and (self.phase == "fall" or (self.phase == "land" and self.timer < 0.06))
 
     # ── reacciones ─────────────────────────────────────────────────────
-    def take_hit(self, ang_world: float, dmg: int, knock: float, crit: bool) -> None:
+    def take_hit(self, ang_world: float, dmg: int, knock: float, crit: bool, heavy: bool = True) -> tuple[int, str | None]:
+        """Aplica un golpe. Devuelve (daño real, evento): «clonk» si la coraza
+        lo absorbe, «ripe» si la coraza se rompe y el tomate madura."""
+        event = None
+        if self.armor > 0:
+            self.armor = max(0.0, self.armor - dmg * (1.0 if crit else 1.6 if heavy else 0.6))
+            if not crit:
+                dmg = dmg // 2 if heavy else 0
+                event = "clonk"
+            if self.armor <= 0:
+                event = "ripe"
         self.hp = max(0, self.hp - dmg)
         self.sq.kick(2.2 + dmg * 0.9 + (2.0 if crit else 0))
         self.flash = 1.0 if crit else 0.6
@@ -1158,6 +1284,7 @@ class Tomato:
             else:
                 self.weak = random_weak_angle(self.weak)
                 self.cracks.append(Crack(self.weak, 0.2, 1.0))
+        return dmg, event
 
     # ── cerebro y física ────────────────────────────────────────────────
     def step(self, g: "Game", dt: float) -> None:
@@ -1173,6 +1300,9 @@ class Tomato:
             # Como un tentetieso: siempre vuelve con el cáliz arriba
             target = round(self.theta / (2 * math.pi)) * 2 * math.pi
             self.theta = lerp(self.theta, target, 1 - math.exp(-dt * 5))
+        if self.kind == "verde":
+            target = 1.0 if self.armor <= 0 else 0.55 * (1 - self.armor / self.max_armor)
+            self.ripe = approach(self.ripe, target, dt * (2.5 if self.armor <= 0 else 1.0))
         base_trem = 1.6 if self.fury() and self.state not in ("intro", "dead") else 0.0
         self.tremble = approach(self.tremble, base_trem, 20 * dt)
         if self.sleeping:
@@ -1183,14 +1313,21 @@ class Tomato:
         if self.grounded():
             self._ground(g, dt)
         # Goteo cuando está malherido
-        if self.bucket() >= 2 and self.state != "intro" and not self.offscreen():
+        rotten = self.kind == "podrida"
+        if (self.bucket() >= 2 or rotten) and self.state != "intro" and not self.offscreen():
             self.drip_t -= dt
             if self.drip_t <= 0:
-                self.drip_t = random.uniform(0.15, 0.5) / (self.bucket() - 1)
+                self.drip_t = random.uniform(0.15, 0.5) / max(1, self.bucket() - 1) * (2.0 if rotten and self.bucket() < 2 else 1.0)
                 c = random.choice(self.cracks)
                 rx, ry = self.radii()
                 a = c.ang + self.theta
-                g.fx.drop(self.x + math.cos(a) * rx * 0.97, self.y + math.sin(a) * ry * 0.97, random.uniform(-40, 40), random.uniform(-20, 40), 2.5)
+                g.fx.drop(self.x + math.cos(a) * rx * 0.97, self.y + math.sin(a) * ry * 0.97, random.uniform(-40, 40), random.uniform(-20, 40), 2.5, self.juice())
+        # El podrido deja un rastro de charcos al rodar
+        if rotten and self.state == "atk" and self.attack == "roll" and self.phase == "go":
+            self.puddle_t -= dt
+            if self.puddle_t <= 0:
+                self.puddle_t = 0.09
+                g.add_puddle(self.x - sign(self.vx) * self.radii()[0] * 0.5, 46)
 
     def _ground(self, g: "Game", dt: float) -> None:
         rolling = self.state == "atk" and self.attack == "roll" and self.phase == "go"
@@ -1260,6 +1397,7 @@ class Tomato:
         opts = [a for a in self.attacks if not (len(self.recent) >= 2 and self.recent[-1] == self.recent[-2] == a)]
         if chained and len(opts) > 1 and self.attack in opts:
             opts.remove(self.attack)
+        opts = opts or list(self.attacks)
         if r.on_tomato and "bounce" in opts and random.random() < 0.6:
             pick = "bounce"
         else:
@@ -1277,13 +1415,15 @@ class Tomato:
         elif pick == "jet":
             self.jet_high = random.random() < 0.5
             g.audio.play("warn_jet")
+        elif pick == "cherry":
+            g.audio.play("warn_cherry")
         else:
             g.audio.play("warn_seeds")
         if r.on_tomato and pick in ("roll", "bounce"):
             g.shrug_rufo(self)
 
     def st_tele(self, g: "Game", dt: float) -> None:
-        dur = TELE[self.attack] * (0.85 if self.fury_chain else 1.0)
+        dur = self.tele(self.attack)
         p = clamp(self.timer / dur, 0, 1)
         if self.attack == "roll":
             self.sq.target = 0.26 * ease_out(p)
@@ -1299,6 +1439,11 @@ class Tomato:
                 rx, ry = self.radii()
                 jy = self.jet_y()
                 g.fx.drop(self.x + self.dir * self.rim_dx(jy), jy, self.dir * random.uniform(20, 90), random.uniform(-30, 30), 2.5)
+        elif self.attack == "cherry":
+            self.sq.target = -0.12 * ease_out(p)
+            self.tremble = 2 + 2 * p
+            if random.random() < 0.05:
+                g.audio.play("pop", 0.5)
         else:
             self.tremble = 4 + 3 * math.sin(self.timer * 40)
         if self.timer >= dur:
@@ -1318,7 +1463,7 @@ class Tomato:
         if a == "roll":
             self.phase = "go"
             self.dir = 1 if g.rufo.x > self.x else -1
-            self.vx = self.dir * (780 + 28 * self.level)
+            self.vx = self.dir * (780 + 28 * self.level) * self.diff["speed"]
             self.sq.target = 0.22
             self.sq.kick(-2.0)
             g.shake(0.25)
@@ -1337,6 +1482,11 @@ class Tomato:
             x0 = self.x + self.dir * self.rim_dx(y)
             g.spawn_jet(x0, y, self.dir, self.hazard_id())
             g.audio.play("jet")
+        elif a == "cherry":
+            self.phase = "spit"
+            self.sq.kick(-3.5)
+            g.spawn_cherries(self)
+            g.audio.play("pop")
         else:
             self.phase = "spray"
             self.sq.kick(3.0)
@@ -1444,11 +1594,12 @@ class FX:
         if len(self.p) < 900:
             self.p.append([DROP, x, y, vx, vy, 2.5, 2.5, size, color, 0])
 
-    def squirt(self, x, y, ang, n, speed, spread=0.7, size=(2, 5)) -> None:
+    def squirt(self, x, y, ang, n, speed, spread=0.7, size=(2, 5), color=JUICE) -> None:
+        hi = (255, 60, 40) if color == JUICE else scale_c(color, 1.4)
         for _ in range(n):
             a = ang + random.uniform(-spread, spread)
             s = speed * random.uniform(0.35, 1.0)
-            self.drop(x, y, math.cos(a) * s, math.sin(a) * s, random.uniform(*size), mix(JUICE, (255, 60, 40), random.random() * 0.5))
+            self.drop(x, y, math.cos(a) * s, math.sin(a) * s, random.uniform(*size), mix(color, hi, random.random() * 0.5))
 
     def sparks(self, x, y, n, speed, color=(255, 210, 120), life=0.25) -> None:
         for _ in range(n):
@@ -1901,9 +2052,39 @@ def build_refl_fade() -> pygame.Surface:
 # ═══════════════════════════════════════════════════════════════════════════
 
 TOMATO_TONES = [(226, 36, 26), (206, 30, 26), (178, 24, 28), (138, 12, 24)]
+GREEN_TONES = [(84, 172, 50), (76, 156, 46), (68, 138, 44), (60, 120, 40)]
+ROT_TONES = [(128, 72, 40), (114, 62, 36), (100, 54, 34), (84, 46, 30)]
 
 
-def bake_tomato(r: int, bucket: int) -> pygame.Surface:
+def tomato_tone(kind: str, bucket: int, ripe: float) -> np.ndarray:
+    if kind == "podrida":
+        return np.array(ROT_TONES[bucket], float)
+    red = np.array(TOMATO_TONES[bucket], float)
+    if kind == "verde":
+        green = np.array(GREEN_TONES[bucket], float)
+        # Al madurar pasa por naranja antes de llegar al rojo
+        mid = np.array([222, 140, 40], float)
+        return green + (mid - green) * min(1.0, ripe * 2) if ripe < 0.5 else mid + (red - mid) * (ripe - 0.5) * 2
+    return red
+
+
+def bake_tomato(r: int, bucket: int, kind: str = "roja", ripe: float = 1.0) -> pygame.Surface:
+    return arrays_to_surface(*bake_arrays(r, bucket, kind, ripe))
+
+
+def arrays_to_surface(col: np.ndarray, alpha: np.ndarray) -> pygame.Surface:
+    surf = pygame.Surface(col.shape[:2], pygame.SRCALPHA)
+    px = pygame.surfarray.pixels3d(surf)
+    px[...] = col
+    del px
+    pa = pygame.surfarray.pixels_alpha(surf)
+    pa[...] = alpha
+    del pa
+    return surf
+
+
+def bake_arrays(r: int, bucket: int, kind: str = "roja", ripe: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """Sombreado por píxel del tomate. Solo numpy: puede correr en otro hilo."""
     rx, ry = r, int(r * TOMATO_ASPECT)
     w, h = 2 * rx + 2, 2 * ry + 2
     xs = (np.arange(w) - w / 2 + 0.5) / rx
@@ -1923,8 +2104,8 @@ def bake_tomato(r: int, bucket: int) -> pygame.Surface:
     L /= np.linalg.norm(L)
     ndl = nxp * L[0] + nyp * L[1] + nzp * L[2]
     lam = np.clip(ndl, 0, 1)
-    base = np.array(TOMATO_TONES[bucket], float)
-    dark = base * np.array([0.26, 0.10, 0.16])
+    base = tomato_tone(kind, bucket, ripe)
+    dark = base * np.array([0.26, 0.10, 0.16]) if kind == "roja" or ripe > 0.7 else base * np.array([0.2, 0.22, 0.12])
     col = dark + (base - dark) * (0.14 + 0.86 * lam)[..., None]
     groove = (0.5 + 0.5 * np.cos(lon * 7)) ** 3 * lat * nz
     col *= (1 - 0.16 * groove)[..., None]
@@ -1938,55 +2119,111 @@ def bake_tomato(r: int, bucket: int) -> pygame.Surface:
         m = np.clip(m / 3, 0, 1)
         col *= (1 - (0.14 * bucket) * m)[..., None]
         col[..., 1] += 6 * bucket * m * (1 - lam)
+    # Podrido: manchas negras y moho
+    if kind == "podrida":
+        rng3 = np.random.default_rng(r * 3 + bucket + 1)
+        spots = np.zeros_like(nx)
+        mold = np.zeros_like(nx)
+        for _ in range(9):
+            cx_, cy_, rr = rng3.uniform(-0.8, 0.8), rng3.uniform(-0.8, 0.8), rng3.uniform(0.08, 0.2)
+            spots = np.maximum(spots, np.clip(1 - np.sqrt((nx - cx_) ** 2 + (ny - cy_) ** 2) / rr, 0, 1))
+        for _ in range(5):
+            cx_, cy_, rr = rng3.uniform(-0.7, 0.7), rng3.uniform(-0.9, 0.2), rng3.uniform(0.1, 0.22)
+            d = np.sqrt((nx - cx_) ** 2 + (ny - cy_) ** 2) / rr
+            mold = np.maximum(mold, np.clip(1 - d, 0, 1) ** 0.6)
+        grain = rng3.random(nx.shape)
+        mold *= 0.55 + 0.45 * grain
+        col *= (1 - 0.75 * np.clip(spots * 2, 0, 1))[..., None]
+        col = col * (1 - mold[..., None] * 0.8) + mold[..., None] * np.array([150, 160, 110]) * (0.4 + 0.6 * lam)[..., None]
     # Translucidez: la luz atraviesa la piel por el borde
     rim = (1 - nz) ** 2.3
     back = np.clip(-(nx * L[0] + ny * L[1]), 0, 1) * 0.65 + 0.35
-    col += (rim * back)[..., None] * np.array([255, 115, 25]) * (0.62 - 0.12 * bucket)
+    rim_col = np.array([255, 115, 25]) if kind == "roja" or ripe > 0.7 else np.array([200, 240, 60])
+    if kind == "podrida":
+        rim_col = np.array([150, 90, 20])
+    col += (rim * back)[..., None] * rim_col * (0.62 - 0.12 * bucket)
     # Rebote cálido del suelo
     col += (np.clip(ny, 0, 1) ** 3 * nz)[..., None] * np.array([110, 40, 18]) * 0.55
     # Especular difuso + punto duro + reflejo frío de la claraboya
     Hv = L + np.array([0, 0, 1.0])
     Hv /= np.linalg.norm(Hv)
     nh = np.clip(nxp * Hv[0] + nyp * Hv[1] + nzp * Hv[2], 0, 1)
-    col += (nh**28)[..., None] * np.array([255, 210, 190]) * 0.36
-    col += (nh**420)[..., None] * 255 * 1.1
+    gloss = 0.35 if kind == "podrida" else 1.0
+    col += (nh**28)[..., None] * np.array([255, 210, 190]) * 0.36 * gloss
+    col += (nh**420)[..., None] * 255 * 1.1 * gloss
     # Piel: motitas
     rng2 = np.random.default_rng(r)
     speck = (rng2.random(nx.shape) > 0.9975) * nz
     col += speck[..., None] * 38
     col = np.clip(col, 0, 255)
     alpha = np.clip((1 - np.sqrt(d2)) * min(rx, ry) * 1.2, 0, 1) * 255
-    surf = pygame.Surface((w, h), pygame.SRCALPHA)
-    px = pygame.surfarray.pixels3d(surf)
-    px[...] = col.astype(np.uint8)
-    del px
-    pa = pygame.surfarray.pixels_alpha(surf)
-    pa[...] = alpha.astype(np.uint8)
-    del pa
-    return surf
+    return col.astype(np.uint8), alpha.astype(np.uint8)
 
 
 class TomatoArt:
-    def __init__(self):
-        self.cache: dict[tuple[int, int], pygame.Surface] = {}
-        self.stars = 0.0
+    """Horneado del tomate en un hilo aparte: el combate nunca se congela."""
 
-    def base(self, r: int, bucket: int) -> pygame.Surface:
-        key = (r, bucket)
+    def __init__(self):
+        self.cache: dict[tuple[int, int, str, int], pygame.Surface] = {}
+        self.pending: dict[tuple[int, int, str, int], Future] = {}
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hornea")
+
+    def request(self, key: tuple[int, int, str, int]) -> None:
+        if key not in self.cache and key not in self.pending:
+            r, bucket, kind, q = key
+            self.pending[key] = self.pool.submit(bake_arrays, r, bucket, kind, q / 4)
+
+    def poll(self) -> None:
+        for key in [k for k, f in self.pending.items() if f.done()]:
+            self.cache[key] = arrays_to_surface(*self.pending.pop(key).result())
+
+    def prefetch(self, level: int) -> None:
+        """Encarga todo lo que necesitará el tomate de ese nivel."""
+        r, kind = tomato_radius(level), tomato_kind(level)
+        for q in (0, 1, 2, 3, 4) if kind == "verde" else (4,):
+            for b in range(4):
+                self.request((r, b, kind, q))
+
+    def trim(self, levels: tuple[int, ...]) -> None:
+        keep = {(tomato_radius(lv), tomato_kind(lv)) for lv in levels} | {(CHERRY_R, "roja")}
+        for key in [k for k in self.cache if (k[0], k[2]) not in keep]:
+            del self.cache[key]
+
+    def base(self, r: int, bucket: int, kind: str = "roja", ripe_q: int = 4) -> pygame.Surface:
+        key = (r, bucket, kind, ripe_q)
+        self.poll()
         s = self.cache.get(key)
-        if s is None:
-            s = bake_tomato(r, bucket)
-            self.cache[key] = s
+        if s is not None:
+            return s
+        self.request(key)
+        # Mientras se hornea, el tramo más parecido ya listo
+        near = [k for k in self.cache if k[0] == r and k[2] == kind]
+        if near:
+            return self.cache[min(near, key=lambda k: abs(k[1] - bucket) + abs(k[3] - ripe_q))]
+        # Nada parecido (primer fotograma del juego): se hornea aquí mismo, sin esperar a la cola
+        fut = self.pending.pop(key)
+        s = arrays_to_surface(*fut.result()) if fut.done() or not fut.cancel() else bake_tomato(r, bucket, kind, ripe_q / 4)
+        self.cache[key] = s
         return s
 
-    def warm(self, r: int) -> None:
-        for b in range(4):
-            self.base(r, b)
+    def warm(self, t: "Tomato") -> None:
+        self.trim((t.level, t.level + 1))
+        self.prefetch(t.level)
+        self.prefetch(t.level + 1)  # el siguiente, mientras se juega este
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+    def cherry(self) -> pygame.Surface:
+        key = (CHERRY_R, 0, "roja", 4)
+        if key not in self.cache:
+            self.cache[key] = bake_tomato(CHERRY_R, 0)
+        return self.cache[key]
 
     def render(self, t: Tomato) -> tuple[pygame.Surface, float, float]:
         """Compone el tomate del fotograma. Devuelve la capa y su origen."""
         sx, sy = t.scale()
-        base = self.base(t.r, t.bucket())
+        base = self.base(t.r, t.bucket(), *t.art_key())
         bw, bh = max(4, int(base.get_width() * sx)), max(4, int(base.get_height() * sy))
         body = pygame.transform.smoothscale(base, (bw, bh))
         pad = int(t.r * 0.42)
@@ -2006,22 +2243,30 @@ class TomatoArt:
                 u, v = c.pts[2]
                 b = soft_blob(18 * k * c.width + 6, (60, 0, 20), 90 + 30 * t.bucket(), 1.2)
                 blit_center(layer, b, *P(u, v))
+        if t.kind == "podrida":
+            rim_c, flesh, hi = (40, 20, 6), (96, 56, 22), (150, 110, 50)
+        elif t.armor > 0:
+            rim_c, flesh, hi = (40, 70, 20), (190, 220, 130), (240, 255, 200)
+        else:
+            rim_c, flesh, hi = (70, 0, 12), (176, 18, 30), (250, 96, 72)
         for c in t.cracks:
             pts = [P(u, v) for u, v in c.pts]
             grow = min(1.0, c.age / 0.12)
             n = max(2, int(len(pts) * grow))
             pts = pts[:n]
-            w0 = max(2, int((5 + 3 * c.width) * k))
-            pygame.draw.lines(layer, (70, 0, 12), False, pts, w0 + 3)
-            pygame.draw.lines(layer, (150, 14, 26), False, pts, w0)
-            pygame.draw.lines(layer, (240, 80, 60), False, pts, max(1, w0 // 3))
-            for i in range(1, n, 2):
-                pygame.draw.circle(layer, (250, 225, 150), pts[i], max(1.5, 2.2 * k))
+            w0 = (4 + 3 * c.width) * k
+            outer = crack_wedge(pts, w0 * 1.5 + 2)
+            pygame.draw.polygon(layer, rim_c, outer)
+            pygame.draw.polygon(layer, flesh, crack_wedge(pts, w0))
+            pygame.draw.lines(layer, hi, False, pts[: max(2, n - 1)], max(1, int(w0 / 3)))
+            for i in range(1, n - 1):
+                pygame.draw.circle(layer, (250, 228, 160), pts[i], max(1.5, 2.0 * k))
+            pygame.draw.circle(layer, (255, 240, 230), pts[0], max(1.5, 1.8 * k))  # brillo húmedo
             # rama secundaria
             if n >= 4:
                 a = c.ang + 0.6
                 tip = (c.pts[2][0] + math.cos(a) * 0.08, c.pts[2][1] + math.sin(a) * 0.08)
-                pygame.draw.line(layer, (110, 6, 20), pts[2], P(*tip), max(1, w0 // 2))
+                pygame.draw.polygon(layer, rim_c, crack_wedge([pts[2], P(*tip)], w0 * 0.6 + 1))
         # Punto débil: pulso luminoso
         if t.state != "intro":
             a = t.weak
@@ -2032,14 +2277,14 @@ class TomatoArt:
             blit_add(layer, glow(10 * k + 4, (255, 240, 200), 2.0), wx, wy)
         # Bulto del chorro de jugo
         if t.state == "tele" and t.attack == "jet":
-            p = clamp(t.timer / TELE["jet"], 0, 1)
+            p = clamp(t.timer / t.tele("jet"), 0, 1)
             jy = t.jet_y() - t.y
             bx = cx + t.dir * t.rim_dx(t.jet_y()) * 0.93
             rad = (14 + 30 * ease_out(p)) * k
             pygame.draw.circle(layer, (120, 8, 18), (bx, cy + jy), rad + 2)
             pygame.draw.circle(layer, (220, 40, 30), (bx, cy + jy), rad)
             pygame.draw.circle(layer, (255, 170, 140), (bx - rad * 0.3, cy + jy - rad * 0.35), rad * 0.3)
-        draw_calyx(layer, P, rx, ry, t.r, t.theta, t.bucket())
+        draw_calyx(layer, P, rx, ry, t.r, t.theta, 3 if t.kind == "podrida" else t.bucket())
         # Destello de impacto y furia
         if t.flash > 0:
             v = int(150 * t.flash)
@@ -2050,6 +2295,22 @@ class TomatoArt:
         ox = random.uniform(-t.tremble, t.tremble)
         oy = random.uniform(-t.tremble, t.tremble) * 0.5
         return layer, t.x - cx + ox, t.y - cy + oy
+
+
+def crack_wedge(pts: list[tuple[float, float]], w0: float) -> list[tuple[float, float]]:
+    """Polígono en cuña a lo largo de una polilínea: ancho en el borde, afilado dentro."""
+    n = len(pts)
+    left, right = [], []
+    for i, (x, y) in enumerate(pts):
+        ax, ay = pts[max(0, i - 1)]
+        bx, by = pts[min(n - 1, i + 1)]
+        dx, dy = bx - ax, by - ay
+        d = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / d, dx / d
+        w = w0 * (1 - i / max(1, n - 1)) ** 0.8 / 2
+        left.append((x + nx * w, y + ny * w))
+        right.append((x - nx * w, y - ny * w))
+    return left + right[::-1]
 
 
 def draw_calyx(layer: pygame.Surface, P, rx: float, ry: float, r: int, theta: float, bucket: int) -> None:
@@ -2245,6 +2506,9 @@ class RufoArt:
         if r.juice > 0:
             k = clamp(r.juice / 1.5, 0, 1)
             spr.fill(mix((255, 255, 255), (255, 120, 110), k), special_flags=pygame.BLEND_RGB_MULT)
+        if r.flash > 0:
+            v = int(255 * r.flash)
+            spr.fill((v, v, v), special_flags=pygame.BLEND_RGB_ADD)
         if r.state == "charge":
             v = int(35 + 30 * math.sin(r.time * 30))
             spr.fill((v, int(v * 0.75), 0), special_flags=pygame.BLEND_RGB_ADD)
@@ -2315,14 +2579,30 @@ def heart_points(cx: float, cy: float, s: float) -> list[tuple[float, float]]:
     return pts
 
 
+_heart_cache: dict = {}
+
+
 def draw_heart(surf, cx, cy, s, full: bool, pulse: float = 0.0) -> None:
-    s *= 1 + pulse
-    pygame.draw.polygon(surf, OUT, heart_points(cx, cy + 1, s + 3))
-    if full:
-        pygame.draw.polygon(surf, (225, 34, 48), heart_points(cx, cy, s))
-        pygame.draw.circle(surf, (255, 150, 150), (cx - s * 0.4, cy - s * 0.35), s * 0.22)
-    else:
-        pygame.draw.polygon(surf, (70, 40, 50), heart_points(cx, cy, s))
+    """Corazón supermuestreado ×4 (bordes suaves), cacheado por tamaño."""
+    s = round(s * (1 + pulse), 1)
+    key = (s, full)
+    img = _heart_cache.get(key)
+    if img is None:
+        k = 4
+        size = int((s + 6) * 2.4 * k)
+        big = pygame.Surface((size, size), pygame.SRCALPHA)
+        c = size / 2
+        pygame.draw.polygon(big, OUT, heart_points(c, c + k, (s + 3) * k))
+        if full:
+            pygame.draw.polygon(big, (225, 34, 48), heart_points(c, c, s * k))
+            pygame.draw.polygon(big, (180, 18, 36), heart_points(c + s * k * 0.12, c + s * k * 0.16, s * k * 0.78))
+            pygame.draw.polygon(big, (232, 44, 56), heart_points(c - s * k * 0.05, c - s * k * 0.05, s * k * 0.8))
+            pygame.draw.circle(big, (255, 160, 160), (c - s * k * 0.42, c - s * k * 0.38), s * k * 0.22)
+        else:
+            pygame.draw.polygon(big, (70, 40, 50), heart_points(c, c, s * k))
+        img = pygame.transform.smoothscale(big, (size // k, size // k))
+        _heart_cache[key] = img
+    blit_center(surf, img, cx, cy)
 
 
 def panel(size, alpha=170, radius=14) -> pygame.Surface:
@@ -2361,20 +2641,22 @@ def build_title(txt: TextKit) -> pygame.Surface:
 
 
 class Game:
-    def __init__(self, screen: pygame.Surface, audio: Audio, keymap: dict[str, list[str]]):
+    def __init__(self, screen: pygame.Surface, audio: Audio, keymap: dict[str, list[str]], opts: dict | None = None):
         self.screen = screen
         self.audio = audio
+        self.keymap = keymap
         self.inp = Input(keymap)
         self.txt = TextKit()
         self.scene = Scene()
         self.fx = FX(self.scene)
         self.tart = TomatoArt()
+        self.tart.prefetch(1)  # el tomate del nivel 1 se hornea mientras estás en el título
         self.rart = RufoArt()
         self.world = pygame.Surface((W, H)).convert()
         self.refl = pygame.Surface((W, H - FLOOR), pygame.SRCALPHA)
         self.title_img = build_title(self.txt)
-        rec = load_json(CFG_DIR / "record.json", {})
-        self.best = int(rec.get("best", 0)) if isinstance(rec, dict) else 0
+        self.top = load_records()
+        self.best = self.top[0]["score"] if self.top else 0
         self.bloom = True
         self.debug = False
         self.paused = False
@@ -2396,9 +2678,31 @@ class Game:
         self.dash_overlap = False
         self.jets: list[dict] = []
         self.seeds: list[list] = []
+        self.cherries: list[dict] = []
+        self.puddles: list[list[float]] = []
+        self.slipping = False
+        self.diff_name = "Normal"
         self.dodged: set[str] = set()
         self.hit_by: set[str] = set()
         self.banner: tuple[str, str, float, float] | None = None
+        self.combo_pop: tuple[str, float] | None = None
+        self.opts: dict = dict(OPT_DEFAULT) | (opts or {})
+        self.diff_name = self.opts["difficulty"] if self.opts["difficulty"] in DIFFICULTY else "Normal"
+        self.bloom = self.opts["bloom"]
+        audio.set_volumes(self.opts["music"], self.opts["sfx"])
+        self.menu = "main"
+        self.cursor = 0
+        self.idle_t = 0.0
+        self.demo = False
+        self.bot: Bot | None = None
+        self.entering = False
+        self.name = ["A", "A", "A"]
+        self.name_i = 0
+        self.rank = -1
+        self.tip: tuple[str, float] | None = None
+        self.tips_seen: set[str] = set()
+        self.alpha = 0.0
+        self.shown_score = 0.0
         self.state = "title"
         self.over_t = 0.0
         self.new_record = False
@@ -2408,9 +2712,18 @@ class Game:
     # ── estados ─────────────────────────────────────────────────────────
     def to_title(self) -> None:
         self.state = "title"
+        self.menu = "main"
+        self.cursor = 0
+        self.idle_t = 0.0
+        self.demo = False
+        self.paused = False
+        self.inp.virtual = set()
+        self.banner = None
+        self.tip = None
+        self.flash = self.red = self.trauma = 0.0
         self.fx.clear()
         self.scene.reset()
-        self.rufo = Rufo(250)
+        self.rufo = Rufo(590)
         self.tomato: Tomato | None = Tomato(1, x=940)
         self.tomato.sleeping = True
         self.tomato.state = "idle"
@@ -2419,6 +2732,8 @@ class Game:
         self.demo_t = 0.0
         self.jets.clear()
         self.seeds.clear()
+        self.cherries.clear()
+        self.puddles.clear()
 
     def new_game(self) -> None:
         self.state = "play"
@@ -2434,27 +2749,200 @@ class Game:
         self.level = 1
         self.stats = {"tomatoes": 0, "max_combo": 0, "crits": 0, "perfect": 0}
         self.rufo = Rufo(300)
-        self.tomato = Tomato(1)
-        self.tart.warm(self.tomato.r)
+        self.tomato = Tomato(1, diff=self.diff())
+        self.tart.warm(self.tomato)
         self.jets.clear()
         self.seeds.clear()
+        self.cherries.clear()
+        self.puddles.clear()
         self.buf.clear()
         self.dodged.clear()
         self.hit_by.clear()
         self.paused = False
         self.slow_t = self.hitstop = 0.0
+        self.flash = self.red = self.trauma = self.zoom_t = self.ab_t = 0.0
+        self.combo_pop = None
         self.new_record = False
+        self.demo = False
+        self.entering = False
+        self.tip = None
+        self.tips_seen = set()
+        self.shown_score = 0.0
         self.show_banner("NIVEL 1", "¡Revienta el tomate!", 1.6)
         self.audio.play("select")
 
     def game_over(self) -> None:
+        self.rank = -1
+        if self.demo:
+            self.to_title()
+            return
         self.state = "over"
         self.over_t = 0.0
+        self.inp.virtual = set()
         self.new_record = self.score > self.best
-        if self.new_record:
-            self.best = self.score
-            save_json(CFG_DIR / "record.json", {"best": self.best})
+        self.entering = self.score > 0 and (len(self.top) < 10 or self.score > self.top[-1]["score"])
+        self.name, self.name_i = list(self.opts.get("last_name", "AAA")[:3].ljust(3, "A")), 0
         self.audio.play("over")
+
+    def start_demo(self) -> None:
+        """Modo demo: el bot juega solo hasta que alguien toque algo."""
+        self.new_game()
+        self.demo = True
+        self.bot = Bot()
+        self.show_banner("DEMO", "Pulsa cualquier tecla", 2.0)
+
+    def commit_name(self) -> None:
+        name = "".join(self.name)
+        entry = {"name": name, "score": self.score, "level": self.level, "diff": self.diff_name}
+        self.top.append(entry)
+        self.top.sort(key=lambda e: -e["score"])
+        self.top = self.top[:10]
+        self.rank = self.top.index(entry)
+        self.best = self.top[0]["score"]
+        self.entering = False
+        self.opts["last_name"] = name
+        save_records(self.top)
+        self.save_opts()
+        self.audio.play("level")
+
+    def save_opts(self) -> None:
+        save_json(CFG_DIR / "config.json", {"keys": self.keymap, "options": self.opts})
+
+    # ── menús ───────────────────────────────────────────────────────────
+    def option_value(self, item: str) -> str:
+        o = self.opts
+        return {
+            "DIFICULTAD": f"<  {self.diff_name}  >",
+            "Dificultad": self.diff_name,
+            "Música": f"{o['music']} / 10",
+            "Efectos": f"{o['sfx']} / 10",
+            "Sacudida de cámara": f"{o['shake']} %",
+            "Destellos": "Normales" if o["flashes"] else "Reducidos",
+            "Bloom": "Sí" if self.bloom else "No",
+            "Vibración del mando": "Sí" if o["rumble"] else "No",
+            "Pantalla completa": "Sí" if o["fullscreen"] else "No",
+            "Tutorial": "Sí" if o["tutorial"] else "No",
+        }.get(item, "")
+
+    def change_option(self, item: str, d: int) -> None:
+        o = self.opts
+        if item in ("DIFICULTAD", "Dificultad"):
+            self.diff_name = DIFF_ORDER[(DIFF_ORDER.index(self.diff_name) + d) % len(DIFF_ORDER)]
+            o["difficulty"] = self.diff_name
+        elif item in ("Música", "Efectos"):
+            key = "music" if item == "Música" else "sfx"
+            o[key] = int(clamp(o[key] + d, 0, 10))
+            self.audio.set_volumes(o["music"], o["sfx"])
+        elif item == "Sacudida de cámara":
+            o["shake"] = int(clamp(o["shake"] + 25 * d, 0, 100))
+            self.shake(0.5 * o["shake"] / 100)
+        elif item == "Destellos":
+            o["flashes"] = not o["flashes"]
+        elif item == "Bloom":
+            self.bloom = o["bloom"] = not self.bloom
+        elif item == "Vibración del mando":
+            o["rumble"] = not o["rumble"]
+            self.rumble(0.6, 0.6, 200)
+        elif item == "Pantalla completa":
+            o["fullscreen"] = not o["fullscreen"]
+            try:
+                pygame.display.toggle_fullscreen()
+            except pygame.error:
+                pass
+        elif item == "Tutorial":
+            o["tutorial"] = not o["tutorial"]
+        self.audio.play("select")
+        self.save_opts()
+
+    def menu_input(self, acts: list[str]) -> None:
+        if self.menu == "records":
+            if "confirm" in acts or "pause" in acts:
+                self.menu, self.cursor = "main", 3
+                self.audio.play("select")
+            return
+        items = MENU_MAIN if self.menu == "main" else MENU_OPTIONS
+        if "up" in acts:
+            self.cursor = (self.cursor - 1) % len(items)
+            self.audio.play("select", 0.5)
+        if "down" in acts:
+            self.cursor = (self.cursor + 1) % len(items)
+            self.audio.play("select", 0.5)
+        item = items[self.cursor]
+        for a, d in (("left", -1), ("right", 1)):
+            if a in acts and self.option_value(item):
+                self.change_option(item, d)
+        if "confirm" in acts:
+            if item == "JUGAR":
+                self.new_game()
+            elif item == "OPCIONES":
+                self.menu, self.cursor = "options", 0
+                self.audio.play("select")
+            elif item == "RÉCORDS":
+                self.menu = "records"
+                self.audio.play("select")
+            elif item == "SALIR":
+                self.running = False
+            elif item == "Volver":
+                self.menu, self.cursor = "main", 2
+                self.audio.play("select")
+            else:
+                self.change_option(item, 1)
+        elif "pause" in acts:
+            if self.menu == "options":
+                self.menu, self.cursor = "main", 2
+            else:
+                self.running = False
+
+    def name_input(self, e: pygame.event.Event, acts: list[str]) -> None:
+        ch = getattr(e, "unicode", "") if e.type == pygame.KEYDOWN else ""
+        if ch and ch.isascii() and ch.isalnum():
+            self.name[self.name_i] = ch.upper()
+            self.name_i = min(2, self.name_i + 1)
+            self.audio.play("select", 0.5)
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_BACKSPACE:
+            self.name_i = max(0, self.name_i - 1)
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_RETURN or "confirm" in acts:
+            self.commit_name()
+        else:
+            letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            for a, d in (("up", 1), ("down", -1)):
+                if a in acts:
+                    cur = letters.find(self.name[self.name_i])
+                    self.name[self.name_i] = letters[(cur + d) % len(letters)]
+            if "left" in acts:
+                self.name_i = max(0, self.name_i - 1)
+            if "right" in acts:
+                self.name_i = min(2, self.name_i + 1)
+
+    # ── tutorial contextual ────────────────────────────────────────────
+    def show_tip(self, key: str, text: str) -> None:
+        if key not in self.tips_seen:
+            self.tips_seen.add(key)
+            self.tip = (text, 4.5)
+
+    def tutorial(self) -> None:
+        t = self.tomato
+        if self.demo or not self.opts["tutorial"] or self.level != 1 or t is None or self.sub != "fight":
+            return
+        if self.tip is not None and self.tip[1] > 1.2:
+            return  # deja leer el consejo actual
+        if self.sub_t > 1.0:
+            self.show_tip("hit", "Acércate y golpea:  J jab  ·  K gancho  ·  Abajo+J jab bajo")
+        if t.state == "tele" and t.attack == "roll":
+            self.show_tip("roll", "¡Va a rodar! Shift lo atraviesa con la esquiva (o salta encima)")
+        elif t.state == "tele" and t.attack == "bounce":
+            self.show_tip("bounce", "¡Va a botar! Sal de la sombra antes de que caiga")
+        elif t.state == "stun":
+            self.show_tip("stun", "¡Aturdido! Castígalo ahora: puntos ×2 y combo doble")
+        elif self.sub_t > 16 and self.stats["crits"] == 0:
+            self.show_tip("weak", "Golpea el punto que brilla: crítico ×2 (luego cambia de sitio)")
+        elif self.sub_t > 26:
+            self.show_tip("climb", "Doble salto + golpe en lo alto = rebote. Así se trepa")
+        elif self.sub_t > 34:
+            self.show_tip("charge", "Mantén J para cargar un golpe de hasta 6 de daño")
+
+    def diff(self) -> dict[str, float]:
+        return DIFFICULTY[self.diff_name]
 
     def show_banner(self, title: str, sub: str, dur: float) -> None:
         self.banner = (title, sub, dur, dur)
@@ -2477,30 +2965,34 @@ class Game:
         if e.type == pygame.QUIT:
             self.running = False
             return
-        if e.type == pygame.WINDOWFOCUSLOST and self.state == "play":
+        if e.type == pygame.WINDOWFOCUSLOST and self.state == "play" and not self.demo:
             self.paused = True
             self.inp.clear()
             return
         acts = self.inp.event(e)
+        if self.state == "over" and self.entering:
+            if e.type in (pygame.KEYDOWN, pygame.JOYBUTTONDOWN, pygame.JOYHATMOTION, pygame.JOYAXISMOTION) and self.over_t > 0.6:
+                self.name_input(e, acts)
+            return
+        if self.demo and self.state == "play":
+            if e.type in (pygame.KEYDOWN, pygame.JOYBUTTONDOWN):
+                self.to_title()
+            return
         if "pad_lost" in acts and self.state == "play":
             self.paused = True
         for a in acts:
             if a == "fullscreen":
-                try:
-                    pygame.display.toggle_fullscreen()
-                except pygame.error:
-                    pass
+                self.change_option("Pantalla completa", 1)
             elif a == "bloom":
-                self.bloom = not self.bloom
+                self.change_option("Bloom", 1)
             elif a == "mute":
                 self.audio.toggle_mute()
             elif a == "debug":
                 self.debug = not self.debug
         if self.state == "title":
-            if "pause" in acts and e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
-                self.running = False
-            elif "confirm" in acts:
-                self.new_game()
+            if acts:
+                self.idle_t = 0.0
+                self.menu_input(acts)
         elif self.state == "play":
             if "pause" in acts:
                 self.paused = not self.paused
@@ -2538,6 +3030,14 @@ class Game:
         self.ab_t = max(0.0, self.ab_t - dt)
         self.flash = max(0.0, self.flash - dt * 2.5)
         self.red = max(0.0, self.red - dt * 2)
+        if self.tip:
+            text, life = self.tip
+            self.tip = (text, life - dt) if life - dt > 0 else None
+        if self.state == "play":
+            self.shown_score = approach(self.shown_score, self.score, max(60.0, (self.score - self.shown_score) * 6) * dt)
+        if self.combo_pop:
+            word, life = self.combo_pop
+            self.combo_pop = (word, life - dt) if life - dt > 0 else None
         if self.banner:
             title, sub, life, mx = self.banner
             life -= dt
@@ -2552,6 +3052,11 @@ class Game:
             return
         if self.paused:
             return
+        if self.demo and self.bot is not None:
+            held, presses = self.bot.act(self)
+            self.inp.virtual = held
+            for a in presses:
+                self.press(a)
         if self.hitstop > 0:
             self.hitstop -= dt
             return
@@ -2566,9 +3071,14 @@ class Game:
             if self.state != "play" or self.hitstop > 0:
                 self.acc = 0.0
                 break
+        self.alpha = clamp(self.acc / DT, 0, 1)
 
     def title_update(self, dt: float) -> None:
         self.title_t += dt
+        self.idle_t += dt
+        if self.idle_t > DEMO_IDLE and self.menu == "main":
+            self.start_demo()
+            return
         self.acc += dt
         while self.acc >= DT:
             self.acc -= DT
@@ -2581,17 +3091,22 @@ class Game:
                 r.facing = 1
                 r.start_attack(self, random.choice(["jab", "jab", "hook", "upper"]))
             r.step(self, DT)
-            r.x = approach(r.x, 250, 200 * DT)
+            r.x = approach(r.x, 590, 200 * DT)
             self.tomato.step(self, DT)
             self.scene.step(DT)
             self.fx.step(DT)
             if random.random() < 0.004:
                 self.fx.text(self.tomato.x + 120, self.tomato.y - 200, "z", (220, 220, 255), 40, 1.8, -50)
+        self.alpha = clamp(self.acc / DT, 0, 1)
 
     def step(self, dt: float) -> None:
         self.t += dt
         r, t = self.rufo, self.tomato
+        r.prev = (r.x, r.y)
+        if t is not None:
+            t.prev = (t.x, t.y)
         self.sub_t += dt
+        self.tutorial()
         # Reloj (congelado mientras entra un tomate o revienta)
         if self.sub == "fight" and t is not None and t.state != "intro":
             before = self.time_left
@@ -2623,14 +3138,19 @@ class Game:
                     self.hazard_touch(t.hazard_id(), t.x)
         self.step_jets(dt)
         self.step_seeds(dt)
+        self.step_cherries(dt)
+        self.step_puddles(dt)
         self.scene.step(dt)
         self.fx.step(dt)
         # Sub-estados
         if self.sub == "burst" and self.sub_t > 2.2:
             self.level += 1
-            self.tomato = Tomato(self.level, x=clamp(W - r.x, 420, 860))
-            self.tart.warm(self.tomato.r)
+            self.tomato = Tomato(self.level, x=clamp(W - r.x, 420, 860), diff=self.diff())
+            self.tart.warm(self.tomato)
             self.sub, self.sub_t = "fight", 0.0
+            if self.level == 2 and self.opts["tutorial"] and not self.demo:
+                self.opts["tutorial"] = False  # tutorial superado
+                self.save_opts()
             self.show_banner(f"NIVEL {self.level}", self.level_hint(), 1.6)
             self.audio.play("level")
         elif self.sub == "ko" and self.sub_t > 1.8:
@@ -2639,6 +3159,13 @@ class Game:
             self.game_over()
 
     def level_hint(self) -> str:
+        kind = tomato_kind(self.level)
+        if kind == "verde":
+            return "Blindado: los jabs rebotan · rompe la coraza con ganchos, cargados y críticos"
+        if kind == "podrida":
+            return "Podrido: deja charcos que resbalan · cuidado al frenar"
+        if self.level == 7:
+            return "Nuevo ataque: enjambre de cherrys · revientan de un golpe"
         if self.level == 3:
             return "Nuevo ataque: chorro de jugo · agáchate o salta"
         if self.level == 5:
@@ -2722,16 +3249,13 @@ class Game:
         wx, wy = t.weak_pos()
         crit = box.inflate(52, 52).collidepoint(wx, wy)
         stunned = t.state == "stun"
-        dmg = r.atk_dmg * (2 if crit else 1)
-        t.take_hit(ang, dmg, a["knock"], crit)
+        dmg = max(1, round(r.atk_dmg * (2 if crit else 1) * self.diff()["dmg"]))
+        dmg, event = t.take_hit(ang, dmg, a["knock"], crit, heavy=r.atk != "jab")
         # Puntuación y combo
-        self.combo = self.combo + (2 if stunned else 1) if self.t - self.last_hit <= COMBO_WINDOW else (2 if stunned else 1)
-        self.last_hit = self.t
-        self.stats["max_combo"] = max(self.stats["max_combo"], self.combo)
-        mult = min(5.0, 1 + 0.1 * (self.combo - 1))
         base = 15 * r.atk_dmg if r.atk == "charge" else a["pts"]
-        pts = int(base * (2 if crit else 1) * (2 if stunned else 1) * mult)
-        self.score += pts
+        if event == "clonk":
+            base = max(2, base // 4)
+        pts = self.add_hit(base * (2 if crit else 1) * (2 if stunned else 1), stunned)
         # Rebote: golpe aéreo sobre la mitad alta → encadenar sin tocar el suelo
         if not r.on_ground and math.sin(ang) < -0.2:
             r.vy = -BOUNCE_V
@@ -2747,12 +3271,30 @@ class Game:
         self.hitstop = stop
         self.shake(a["shake"] + (0.25 if crit else 0))
         out = ang
-        self.fx.squirt(hx, hy, out, 10 + dmg * 5, 420 + dmg * 120)
-        self.fx.sparks(hx, hy, 6 + dmg * 2, 500)
-        self.fx.ring(hx, hy, 30 + dmg * 12, (255, 200, 150), 0.22, 4)
-        if dmg >= 3:
-            self.fx.pulp(hx, hy, dmg, 500)
-        self.audio.play(a["snd"])
+        self.rumble(0.25 + 0.1 * dmg, 0.35, 90 + 20 * dmg)
+        if event == "clonk":
+            self.fx.sparks(hx, hy, 14, 650, (220, 235, 255), 0.3)
+            self.fx.ring(hx, hy, 40, (200, 220, 255), 0.2, 4)
+            self.audio.play("clonk")
+            self.fx.text(hx, hy - 60, "¡CLONK!", (200, 230, 255), 34, 0.8)
+            if dmg:
+                self.fx.squirt(hx, hy, out, 6, 380, color=t.juice())
+        else:
+            self.fx.squirt(hx, hy, out, 10 + dmg * 5, 420 + dmg * 120, color=t.juice())
+            self.fx.sparks(hx, hy, 6 + dmg * 2, 500)
+            self.fx.ring(hx, hy, 30 + dmg * 12, (255, 200, 150), 0.22, 4)
+            if dmg >= 3:
+                self.fx.pulp(hx, hy, dmg, 500)
+            self.audio.play(a["snd"])
+        if event == "ripe":
+            self.audio.play("ripe")
+            self.flash = max(self.flash, 0.5)
+            self.shake(0.5)
+            self.fx.ring(t.x, t.y, t.r * 1.3, (120, 255, 120), 0.5, 8)
+            self.fx.sparks(t.x, t.y - t.radii()[1] * 0.5, 40, 900, (180, 255, 140), 0.45)
+            self.fx.text(t.x, t.y - t.radii()[1] - 20, "¡CORAZA ROTA! ¡MADURO!", (170, 255, 140), 48, 1.6, -40)
+        if t.kind == "podrida" and dmg >= 2 and random.random() < 0.6:
+            self.add_puddle(hx + random.uniform(-40, 40), 34)
         col = (255, 255, 255) if not stunned else (255, 230, 120)
         self.fx.text(hx, hy - 30, f"+{pts}", col, 28 if pts < 100 else 36)
         if crit:
@@ -2766,6 +3308,116 @@ class Game:
             self.fx.squirt(hx, hy, out, 30, 900, 0.5)
         if t.hp <= 0:
             self.burst(t)
+
+    def add_hit(self, base: float, stunned: bool = False) -> int:
+        """Suma un golpe al combo y devuelve los puntos ganados."""
+        before = self.combo
+        step = 2 if stunned else 1
+        self.combo = self.combo + step if self.t - self.last_hit <= COMBO_WINDOW else step
+        self.last_hit = self.t
+        self.stats["max_combo"] = max(self.stats["max_combo"], self.combo)
+        mult = min(5.0, 1 + 0.1 * (self.combo - 1))
+        pts = int(base * mult * self.diff()["score"])
+        self.score += pts
+        for mark, word in ((10, "¡BIEN!"), (20, "¡BRUTAL!"), (30, "¡SALVAJE!"), (41, "¡×5 MÁXIMO!")):
+            if before < mark <= self.combo:
+                self.combo_pop = (word, 1.2)
+                self.audio.play("perfect", 0.6)
+        return pts
+
+    def rumble(self, low: float, high: float, ms: int) -> None:
+        pad = self.inp.pad
+        if pad is not None and self.opts.get("rumble", True):
+            try:
+                pad.rumble(low, high, ms)
+            except (pygame.error, AttributeError):
+                pass
+
+    # ── charcos (tomate podrido) ───────────────────────────────────────
+    def add_puddle(self, x: float, hw: float) -> None:
+        x = clamp(x, WALL_L + hw, WALL_R - hw)
+        for p in self.puddles:
+            if abs(p[0] - x) < p[1] + hw * 0.5:
+                lo, hi = min(p[0] - p[1], x - hw), max(p[0] + p[1], x + hw)
+                p[0], p[1] = (lo + hi) / 2, min(170.0, (hi - lo) / 2)
+                p[2] = p[3] = 9.0
+                return
+        if len(self.puddles) < 10:
+            self.puddles.append([x, hw, 9.0, 9.0])
+
+    def step_puddles(self, dt: float) -> None:
+        for p in self.puddles:
+            p[2] -= dt
+        self.puddles = [p for p in self.puddles if p[2] > 0]
+        r = self.rufo
+        slip = r.on_ground and not r.on_tomato and any(abs(r.x - p[0]) < p[1] and p[2] > 0.5 for p in self.puddles)
+        if slip and not self.slipping and abs(r.vx) > 120:
+            self.fx.text(r.x, r.y - 100, "¡RESBALA!", (190, 210, 120), 24, 0.7)
+        self.slipping = slip
+
+    # ── cherrys ────────────────────────────────────────────────────────
+    def spawn_cherries(self, t: Tomato) -> None:
+        r = self.rufo
+        rx, ry = t.radii()
+        n = 2 + t.level // 4
+        for i in range(n):
+            tx = clamp(r.x + (i - (n - 1) / 2) * 150 + random.uniform(-40, 40), WALL_L + 30, WALL_R - 30)
+            x0, y0 = t.x + random.uniform(-0.3, 0.3) * rx, t.y - ry * 0.85
+            vy = -random.uniform(650, 850)
+            gr = 2000.0
+            tt = (-vy + math.sqrt(vy * vy + 2 * gr * (FLOOR - CHERRY_R - y0))) / gr
+            self.cherries.append({"x": x0, "y": y0, "vx": (tx - x0) / tt, "vy": vy, "t": 0.0, "hop": random.uniform(0.35, 0.7), "id": f"{t.hazard_id()}:c{i}", "sq": Spring(260, 10), "face": -1})
+
+    def pop_cherry(self, c: dict, scored: bool) -> None:
+        c["dead"] = True
+        self.fx.squirt(c["x"], c["y"], -math.pi / 2, 18, 420, 1.4)
+        self.fx.seeds(c["x"], c["y"], 5, 300)
+        self.fx.ring(c["x"], c["y"], 46, (255, 150, 120), 0.25, 4)
+        self.scene.stain(c["x"], FLOOR + random.uniform(6, 40), 14)
+        self.audio.play("pop")
+        if scored:
+            pts = self.add_hit(30)
+            self.fx.text(c["x"], c["y"] - 40, f"+{pts}", WHITE, 26)
+
+    def step_cherries(self, dt: float) -> None:
+        r = self.rufo
+        box = r.active_box()
+        hb = r.hurtbox()
+        for c in self.cherries:
+            c["t"] += dt
+            c["sq"].step(dt)
+            c["vy"] = min(c["vy"] + 2000 * dt, 1400)
+            c["x"] += c["vx"] * dt
+            c["y"] += c["vy"] * dt
+            c["face"] = 1 if r.x > c["x"] else -1
+            if c["y"] >= FLOOR - CHERRY_R:
+                c["y"] = FLOOR - CHERRY_R
+                if c["vy"] > 200:
+                    c["sq"].kick(c["vy"] * 0.004)
+                c["vy"] = 0.0
+                c["vx"] = approach(c["vx"], 0, 1600 * dt)
+                c["hop"] -= dt
+                if c["hop"] <= 0 and self.sub == "fight":
+                    c["hop"] = random.uniform(0.5, 0.8)
+                    c["vx"] = c["face"] * random.uniform(200, 300) * self.diff()["speed"]
+                    c["vy"] = -random.uniform(520, 680)
+                    c["sq"].kick(-3)
+            if c["x"] < WALL_L + CHERRY_R or c["x"] > WALL_R - CHERRY_R:
+                c["x"] = clamp(c["x"], WALL_L + CHERRY_R, WALL_R - CHERRY_R)
+                c["vx"] = -c["vx"] * 0.6
+            near = pygame.Rect(int(c["x"] - CHERRY_R), int(c["y"] - CHERRY_R), CHERRY_R * 2, CHERRY_R * 2)
+            if box is not None and box.colliderect(near.inflate(14, 22)) and self.sub == "fight":
+                self.pop_cherry(c, True)
+                self.hitstop = max(self.hitstop, 0.03)
+                if not r.on_ground and c["y"] > r.y - 10:
+                    r.vy = -BOUNCE_V * 0.8
+                    r.air_jumps = 1
+                continue
+            if near.inflate(-8, -8).colliderect(hb) and self.sub == "fight":
+                self.hazard_touch(c["id"], c["x"])
+            if c["t"] > 7.5 or (self.sub != "fight" and c["t"] > 0.3):
+                self.pop_cherry(c, False)
+        self.cherries = [c for c in self.cherries if not c.get("dead")]
 
     def hammer_ground(self, r: Rufo) -> None:
         self.shake(0.2)
@@ -2814,6 +3466,8 @@ class Game:
         if juice:
             r.juice = 2.5
         self.audio.play("hurt")
+        self.rumble(0.9, 0.9, 300)
+        r.flash = 1.0
         self.shake(0.55)
         self.red = 0.6
         self.hitstop = 0.07
@@ -2833,11 +3487,13 @@ class Game:
         t.state = "dead"
         self.sub, self.sub_t = "burst", 0.0
         rx, ry = t.radii()
+        jc = t.juice()
+        hi = (255, 70, 50) if jc == JUICE else scale_c(jc, 1.5)
         for _ in range(300):
             a = random.uniform(-math.pi, math.pi)
             s = random.uniform(200, 1500) * (1.2 if math.sin(a) < 0 else 0.7)
             d = random.uniform(0, 0.8)
-            self.fx.drop(t.x + math.cos(a) * rx * d, t.y + math.sin(a) * ry * d, math.cos(a) * s, math.sin(a) * s - 200, random.uniform(2, 7), mix((150, 4, 18), (255, 70, 50), random.random()))
+            self.fx.drop(t.x + math.cos(a) * rx * d, t.y + math.sin(a) * ry * d, math.cos(a) * s, math.sin(a) * s - 200, random.uniform(2, 7), mix(scale_c(jc, 0.75), hi, random.random()))
         self.fx.pulp(t.x, t.y, 36, 1100)
         self.fx.seeds(t.x, t.y, 40, 900)
         self.fx.sparks(t.x, t.y, 50, 1100, (255, 200, 140), 0.5)
@@ -2852,6 +3508,9 @@ class Game:
         self.slowmo(0.25, 0.7)
         self.flash = 1.0
         self.shake(1.0)
+        self.rumble(1.0, 1.0, 600)
+        for c in self.cherries:
+            c["t"] = 99.0
         self.scene.kick(1.6)
         self.audio.play("burst")
         bonus = 500 * self.level
@@ -2878,6 +3537,10 @@ class Game:
         self.fx.puff(t.x - rx * 0.7, FLOOR, int(10 * power))
         self.fx.puff(t.x + rx * 0.7, FLOOR, int(10 * power))
         self.fx.ring(t.x, FLOOR + 6, rx * 2.2, (230, 200, 170), 0.5, 6, flat=0.16)
+        self.rumble(0.8 * power, 0.3, 250)
+        if t.kind == "podrida":
+            self.add_puddle(t.x - rx * 0.9, 60)
+            self.add_puddle(t.x + rx * 0.9, 60)
         r = self.rufo
         if r.on_ground and not r.on_tomato and abs(r.x - t.x) < rx + 260 and r.state not in ("dead", "dash"):
             r.vy = -260.0 * power  # el suelo da un respingo
@@ -2957,6 +3620,21 @@ class Game:
     # DIBUJO
     # ═══════════════════════════════════════════════════════════════════
     def draw(self) -> None:
+        """Dibuja interpolando entre los dos últimos pasos de física: movimiento
+        suave a cualquier tasa de refresco sin tocar la simulación."""
+        a = self.alpha if not self.paused and self.hitstop <= 0 else 1.0
+        saved = []
+        for obj in (self.rufo, self.tomato):
+            if obj is not None and hasattr(obj, "prev") and math.hypot(obj.x - obj.prev[0], obj.y - obj.prev[1]) < 120:
+                saved.append((obj, obj.x, obj.y))
+                obj.x, obj.y = lerp(obj.prev[0], obj.x, a), lerp(obj.prev[1], obj.y, a)
+        try:
+            self._draw()
+        finally:
+            for obj, x, y in saved:
+                obj.x, obj.y = x, y
+
+    def _draw(self) -> None:
         world = self.world
         add = world  # lo aditivo se mezcla directamente sobre el mundo
         self.scene.draw_back(world)
@@ -2976,6 +3654,7 @@ class Game:
         self.refl.blit(fr, (r.x - ANCHOR[0], (FLOOR - r.y) - (CANVAS[1] - ANCHOR[1])))
         self.refl.blit(self.scene.refl_fade, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         world.blit(self.refl, (0, FLOOR))
+        self.draw_puddles(world)
         self.scene.draw_lamps(add)
         # Sombras de contacto
         if t is not None:
@@ -3004,6 +3683,10 @@ class Game:
             world.blit(img, (ox, oy))
             if t.state == "stun":
                 self.draw_stars(world, t)
+            if t.kind == "podrida":
+                self.draw_flies(world, t)
+        for c in self.cherries:
+            self.draw_cherry(world, c)
         # Fantasmas de la esquiva
         if r.state == "dash" and r.ghost_t <= 0:
             r.ghost_t = 0.03
@@ -3059,7 +3742,7 @@ class Game:
         y = int(t.jet_y())
         x0 = t.x + t.dir * t.rim_dx(y)
         end = WALL_R if t.dir > 0 else WALL_L
-        p = t.timer / TELE["jet"]
+        p = t.timer / t.tele("jet")
         if int(p * 10) % 2 == 0:
             n = int(abs(end - x0) / 28)
             for i in range(n):
@@ -3088,6 +3771,55 @@ class Game:
         pygame.draw.ellipse(world, (110, 100, 60), (x - 8, y - 5, 16, 10))
         pygame.draw.ellipse(world, (245, 228, 160), (x - 7, y - 4, 14, 8))
         pygame.draw.circle(world, WHITE, (x - 2, y - 2), 1.5)
+
+    def draw_puddles(self, world) -> None:
+        for x, hw, life, mx in self.puddles:
+            a = clamp(life / 1.5, 0, 1) * clamp((mx - life) / 0.25, 0, 1)
+            w, h = int(hw * 2), max(6, int(hw * 0.34))
+            blob = pygame.transform.smoothscale(soft_blob(64, (40, 46, 10), int(220 * a), 0.45), (w, h))
+            blit_center(world, blob, x, FLOOR + 10)
+            gl = pygame.transform.scale(glow(20, scale_c((90, 100, 50), a), 1.4), (int(w * 0.7), max(3, h // 3)))
+            blit_add(world, gl, x - hw * 0.15, FLOOR + 7)
+            k = int(self.t * 3 + x) % 7
+            if k < 2:
+                pygame.draw.circle(world, scale_c((150, 160, 80), a), (x + math.sin(x + self.t) * hw * 0.5, FLOOR + 9), 2 + k, 1)
+
+    def draw_flies(self, world, t: Tomato) -> None:
+        rx, ry = t.radii()
+        for i in range(7):
+            a = self.t * (2.2 + i * 0.37) + i * 1.9
+            fx = t.x + math.cos(a) * (rx * 0.7 + 40 * math.sin(self.t * 1.3 + i))
+            fy = t.y - ry * 0.75 + math.sin(a * 1.7) * ry * 0.35
+            wing = 2 + int(abs(math.sin(self.t * 60 + i)) * 3)
+            pygame.draw.ellipse(world, (170, 180, 190), (fx - wing, fy - 4, wing * 2, 3))
+            pygame.draw.circle(world, (15, 15, 15), (fx, fy), 2.3)
+        for i in range(3):
+            x0 = t.x + (i - 1) * rx * 0.45
+            pts = [(x0 + math.sin(self.t * 3 + k * 0.6 + i) * 10, t.y - ry - 10 - k * 9 - (self.t * 25 + i * 20) % 30) for k in range(6)]
+            pygame.draw.lines(world, (90, 112, 52), False, pts, 2)
+
+    def draw_cherry(self, world, c: dict) -> None:
+        k = clamp(c["sq"].x, -0.4, 0.5)
+        base = self.tart.cherry()
+        w, h = int(base.get_width() * (1 + k * 0.6)), int(base.get_height() * (1 - k))
+        img = pygame.transform.smoothscale(base, (max(4, w), max(4, h)))
+        x, y = c["x"], c["y"] + base.get_height() / 2 - h / 2
+        sh = pygame.transform.scale(soft_blob(16, (0, 0, 0), 140, 1.2), (int(28 * (1 - min(0.6, (FLOOR - c["y"]) / 300))), 7))
+        blit_center(world, sh, x, FLOOR + 3)
+        if c["t"] > 6.5 and int(c["t"] * 12) % 2:
+            img = img.copy()
+            img.fill((90, 90, 90), special_flags=pygame.BLEND_RGB_ADD)
+        blit_center(world, img, x, y)
+        # Ojitos enfadados mirando a Rufo
+        f = c["face"]
+        for ex in (2, 9):
+            e = (x + f * ex - 5 * f + 1, y - 3)
+            pygame.draw.circle(world, WHITE, e, 4)
+            pygame.draw.circle(world, OUT, (e[0] + f * 1.5, e[1] + 0.5), 2)
+        pygame.draw.line(world, OUT, (x + f * -3, y - 9), (x + f * 4, y - 6), 2)
+        pygame.draw.line(world, OUT, (x + f * 6, y - 6), (x + f * 12, y - 9), 2)
+        pygame.draw.line(world, (60, 130, 40), (x, y - h / 2 + 2), (x + 3, y - h / 2 - 7), 3)
+        pygame.draw.circle(world, (80, 160, 50), (x - 2, y - h / 2 + 3), 4)
 
     def draw_stars(self, world, t: Tomato) -> None:
         rx, ry = t.radii()
@@ -3148,7 +3880,7 @@ class Game:
             small.blit(small, (0, 0), special_flags=pygame.BLEND_ADD)
             world.blit(pygame.transform.smoothscale(small, (W, H)), (0, 0), special_flags=pygame.BLEND_ADD)
         out = world
-        if self.ab_t > 0:
+        if self.ab_t > 0 and self.opts["flashes"]:
             # Aberración cromática en los críticos
             off = int(2 + 8 * self.ab_t / 0.2)
             rch = world.copy()
@@ -3167,16 +3899,16 @@ class Game:
             out = pygame.transform.smoothscale(out.subsurface((cx, cy, vw, vh)), (W, H))
         scr = self.screen
         scr.fill((8, 6, 12))
-        amp = 16 * self.trauma**2
+        amp = 16 * self.trauma**2 * self.opts["shake"] / 100
         ox = amp * (math.sin(self.real_t * 71) + math.sin(self.real_t * 43.7)) * 0.5
         oy = amp * (math.sin(self.real_t * 63.3) + math.sin(self.real_t * 37.1)) * 0.5
         scr.blit(out, (ox, oy))
         scr.blit(self.scene.vignette, (0, 0))
         if self.flash > 0:
-            v = int(255 * min(1.0, self.flash) * 0.8)
+            v = int(255 * min(1.0, self.flash) * (0.8 if self.opts["flashes"] else 0.2))
             scr.fill((v, int(v * 0.85), int(v * 0.8)), special_flags=pygame.BLEND_ADD)
         if self.red > 0:
-            v = int(120 * self.red)
+            v = int(120 * self.red * (1.0 if self.opts["flashes"] else 0.35))
             scr.fill((v, 0, 0), special_flags=pygame.BLEND_ADD)
         if self.state == "title":
             self.draw_title(scr)
@@ -3184,6 +3916,10 @@ class Game:
             self.draw_hud(scr)
             if self.banner:
                 self.draw_banner(scr)
+            if self.tip and self.state == "play":
+                self.draw_tip(scr)
+            if self.demo and int(self.real_t * 1.5) % 2 == 0:
+                blit_center(scr, self.txt.outlined("DEMO · pulsa cualquier tecla", 34, (255, 220, 120)), W / 2, H - 40)
             if self.state == "over":
                 self.draw_over(scr)
             elif self.paused:
@@ -3194,7 +3930,7 @@ class Game:
         txt = self.txt
         for i in range(MAX_HEARTS):
             draw_heart(scr, 70 + i * 46, 48, 17, i < self.hearts, 0.08 * math.sin(self.real_t * 8) if i == self.hearts - 1 and self.hearts == 1 else 0)
-        scr.blit(txt.outlined(f"{self.score:,}".replace(",", " "), 40, WHITE), (50, 76))
+        scr.blit(txt.outlined(f"{int(self.shown_score):,}".replace(",", " "), 40, WHITE), (50, 76))
         if self.combo > 1:
             mult = min(5.0, 1 + 0.1 * (self.combo - 1))
             img = txt.outlined(f"COMBO {self.combo}  ×{mult:.1f}", 28, (255, 210, 90))
@@ -3202,6 +3938,14 @@ class Game:
             left = clamp(1 - (self.t - self.last_hit) / COMBO_WINDOW, 0, 1)
             pygame.draw.rect(scr, OUT, (54, 146, 184, 8), border_radius=4)
             pygame.draw.rect(scr, (255, 200, 80), (55, 147, int(182 * left), 6), border_radius=3)
+        if self.combo_pop:
+            word, life = self.combo_pop
+            k = back_out(min(1.0, (1.2 - life) / 0.2))
+            img = self.txt.outlined(word, max(8, int(44 * k)), (255, 120, 60), w=4)
+            if life < 0.3:
+                img = img.copy()
+                img.set_alpha(int(255 * life / 0.3))
+            scr.blit(img, (52, 158))
         t = self.tomato
         r = self.rufo
         hidden = r.y < 190 and abs(r.x - W / 2) < 330
@@ -3220,7 +3964,8 @@ class Game:
         scr.blit(img, (W - 60 - img.get_width(), 22))
 
     def draw_top_center(self, scr, t: Tomato | None) -> None:
-        img = self.txt.outlined(f"TOMATE · NIVEL {self.level}", 30, (255, 236, 220))
+        name = KIND_NAMES[t.kind if t is not None else tomato_kind(self.level)]
+        img = self.txt.outlined(f"{name} · NIVEL {self.level}", 30, (255, 236, 220))
         blit_center(scr, img, W / 2, 34)
         bw, bx, by = 460, W / 2 - 230, 56
         pygame.draw.rect(scr, OUT, (bx - 3, by - 3, bw + 6, 24), border_radius=12)
@@ -3234,6 +3979,12 @@ class Game:
                 col = (230, 40, 40) if not t.fury() else mix((150, 10, 20), (255, 60, 40), 0.5 + 0.5 * math.sin(self.real_t * 12))
                 pygame.draw.rect(scr, col, (bx, by, int(bw * hp), 18), border_radius=9)
                 pygame.draw.rect(scr, (255, 140, 120), (bx + 6, by + 3, max(0, int(bw * hp) - 12), 4), border_radius=2)
+            if t.max_armor and t.armor > 0:
+                a = t.armor / t.max_armor
+                pygame.draw.rect(scr, (60, 70, 80), (bx, by, bw, 18), border_radius=9)
+                pygame.draw.rect(scr, (170, 196, 210), (bx, by, int(bw * a), 18), border_radius=9)
+                pygame.draw.rect(scr, (235, 245, 255), (bx + 6, by + 3, max(0, int(bw * a) - 12), 4), border_radius=2)
+                blit_center(scr, self.txt.outlined("CORAZA", 20, (230, 240, 255)), W / 2, by + 9)
 
     def draw_banner(self, scr) -> None:
         title, sub, life, mx = self.banner
@@ -3255,22 +4006,67 @@ class Game:
         img = self.title_img
         if k < 0.999:
             img = pygame.transform.smoothscale(img, (max(1, int(img.get_width() * k)), max(1, int(img.get_height() * k))))
-        blit_center(scr, img, W / 2, 150 + bob)
+        blit_center(scr, img, W / 2, 140 + bob)
         tag = self.txt.outlined("Un tomate del tamaño de una casa. Un cocinero diminuto con guantes de boxeo. Noventa segundos.", 26, (235, 225, 215))
-        blit_center(scr, tag, W / 2, 262)
-        if int(self.title_t * 2) % 2 == 0:
-            blit_center(scr, self.txt.outlined("Pulsa ESPACIO o J para empezar", 40, (255, 220, 120)), W / 2, 318)
-        p = panel((600, 124))
-        px, py = 70, 372
-        scr.blit(p, (px, py))
-        lines = [
-            "A/D o flechas: mover · W/Arriba/Espacio: saltar (doble) · S/Abajo: agacharse",
-            "J jab (mantén para cargar) · K gancho · Arriba+J gancho ascendente",
-            "Abajo+J en el aire: martillo · Shift/L esquiva · P pausa",
-            f"Récord: {self.best:,}".replace(",", " ") + "   ·   F11 pantalla completa · B bloom · M silencio",
-        ]
-        for i, s in enumerate(lines):
-            blit_center(scr, self.txt.plain(s, 21, (220, 215, 230)), px + 300, py + 22 + i * 27)
+        blit_center(scr, tag, W / 2, 250)
+        if self.menu == "main":
+            self.draw_menu(scr, MENU_MAIN, 70, 296, 430, 44, 40)
+            best = self.top[0] if self.top else None
+            if best:
+                rec = f"Récord: {best['score']:,}".replace(",", " ") + f"  ·  {best['name']}"
+                blit_center(scr, self.txt.outlined(rec, 26, (255, 220, 140)), 285, 545)
+        elif self.menu == "options":
+            self.draw_menu(scr, MENU_OPTIONS, W / 2 - 330, 284, 660, 34, 30, values=True)
+        else:
+            self.draw_records(scr)
+        hint = "W/S o flechas: elegir  ·  A/D: cambiar  ·  J/Espacio/Intro: aceptar  ·  Esc: volver"
+        blit_center(scr, self.txt.plain(hint, 20, (200, 195, 210)), W / 2, H - 22)
+
+    def draw_menu(self, scr, items: list[str], x: float, y: float, w: int, step: int, size: int, values: bool = False) -> None:
+        scr.blit(panel((w, step * len(items) + 24), 180, 16), (x, y))
+        for i, item in enumerate(items):
+            yy = y + 12 + i * step + step / 2
+            sel = i == self.cursor
+            if sel:
+                glow_w = w - 24
+                bar = pygame.Surface((glow_w, step - 6), pygame.SRCALPHA)
+                pulse = 0.5 + 0.5 * math.sin(self.real_t * 6)
+                pygame.draw.rect(bar, (255, 120, 60, int(70 + 50 * pulse)), bar.get_rect(), border_radius=10)
+                scr.blit(bar, (x + 12, yy - (step - 6) / 2))
+            col = (255, 230, 170) if sel else (215, 210, 225)
+            label = self.txt.outlined(item, size, col) if sel else self.txt.plain(item, size, col)
+            scr.blit(label, (x + 30, yy - label.get_height() / 2))
+            val = self.option_value(item)
+            if val:
+                v = self.txt.plain(val, size, (255, 210, 120) if sel else (190, 185, 200))
+                scr.blit(v, (x + w - 30 - v.get_width(), yy - v.get_height() / 2))
+
+    def draw_records(self, scr) -> None:
+        cw, ch = 620, 420
+        x, y = W / 2 - cw / 2, 278
+        scr.blit(panel((cw, ch), 200, 18), (x, y))
+        blit_center(scr, self.txt.outlined("RÉCORDS", 44, (255, 220, 160)), W / 2, y + 34)
+        if not self.top:
+            blit_center(scr, self.txt.plain("Aún no hay récords. ¡A por el primero!", 30, (220, 215, 230)), W / 2, y + ch / 2)
+        for i, e in enumerate(self.top):
+            yy = y + 70 + i * 33
+            col = (255, 220, 120) if i == 0 else (225, 220, 235)
+            scr.blit(self.txt.plain(f"{i + 1:>2}.", 28, col), (x + 40, yy))
+            scr.blit(self.txt.plain(e["name"], 28, col), (x + 100, yy))
+            scr.blit(self.txt.plain(f"nivel {e.get('level', 0)} · {e.get('diff', 'Normal')}", 24, (170, 165, 185)), (x + 200, yy + 3))
+            v = self.txt.plain(f"{e['score']:,}".replace(",", " "), 28, col)
+            scr.blit(v, (x + cw - 40 - v.get_width(), yy))
+
+    def draw_tip(self, scr) -> None:
+        text, life = self.tip
+        a = clamp(min(life / 0.4, (4.5 - life) / 0.25), 0, 1)
+        img = self.txt.outlined(text, 28, (255, 245, 220))
+        w, h = img.get_width() + 40, img.get_height() + 18
+        box = panel((w, h), 200, 12)
+        pygame.draw.rect(box, (255, 200, 90, 160), (0, 0, 6, h), border_radius=3)
+        box.blit(img, (22, 9))
+        box.set_alpha(int(255 * a))
+        scr.blit(box, (W / 2 - w / 2, H - 120 + (1 - a) * 20))
 
     def draw_pause(self, scr) -> None:
         dim = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -3284,26 +4080,37 @@ class Game:
         dim = pygame.Surface((W, H), pygame.SRCALPHA)
         dim.fill((6, 4, 10, int(160 * k)))
         scr.blit(dim, (0, 0))
-        cw, ch = 560, 420
+        cw, ch = 560, 470
         y = H / 2 - ch / 2 + (1 - k) * 80
         scr.blit(panel((cw, ch), 210, 22), (W / 2 - cw / 2, y))
         blit_center(scr, self.txt.outlined("FIN DE LA PARTIDA", 64, (255, 220, 160), w=4), W / 2, y + 50)
         rows = [
             ("Puntos", f"{self.score:,}".replace(",", " ")),
-            ("Récord", f"{self.best:,}".replace(",", " ") + ("  ¡NUEVO!" if self.new_record else "")),
+            ("Récord", f"{max(self.best, self.score):,}".replace(",", " ") + ("  ¡NUEVO!" if self.new_record else "")),
             ("Tomates reventados", str(self.stats["tomatoes"])),
             ("Combo máximo", str(self.stats["max_combo"])),
             ("Críticos", str(self.stats["crits"])),
             ("Esquivas perfectas", str(self.stats["perfect"])),
         ]
         for i, (a, b) in enumerate(rows):
-            yy = y + 110 + i * 42
+            yy = y + 104 + i * 40
             scr.blit(self.txt.plain(a, 32, (210, 205, 220)), (W / 2 - 230, yy))
             col = (255, 220, 100) if (i == 1 and self.new_record) else WHITE
             v = self.txt.plain(b, 34, col)
             scr.blit(v, (W / 2 + 230 - v.get_width(), yy))
-        if self.over_t > 0.8 and int(self.over_t * 2) % 2 == 0:
-            blit_center(scr, self.txt.outlined("ESPACIO / J: otra  ·  Esc: menú", 30, (255, 220, 120)), W / 2, y + ch - 30)
+        if self.entering:
+            blit_center(scr, self.txt.outlined("¡ENTRAS EN LA TABLA! Tus iniciales:", 28, (255, 220, 120)), W / 2, y + ch - 112)
+            for i, ch_ in enumerate(self.name):
+                cx = W / 2 + (i - 1) * 64
+                sel = i == self.name_i and int(self.real_t * 3) % 2 == 0
+                pygame.draw.rect(scr, (255, 150, 80) if sel else (90, 80, 100), (cx - 26, y + ch - 92, 52, 58), 3, border_radius=8)
+                blit_center(scr, self.txt.outlined(ch_, 48, WHITE), cx, y + ch - 62)
+            blit_center(scr, self.txt.plain("Escribe o usa W/S · Intro para guardar", 20, (190, 185, 200)), W / 2, y + ch - 16)
+        else:
+            if self.rank >= 0:
+                blit_center(scr, self.txt.outlined(f"Puesto {self.rank + 1} en la tabla de récords", 28, (160, 230, 255)), W / 2, y + ch - 80)
+            if self.over_t > 0.8 and int(self.over_t * 2) % 2 == 0:
+                blit_center(scr, self.txt.outlined("ESPACIO / J: otra  ·  Esc: menú", 30, (255, 220, 120)), W / 2, y + ch - 34)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3311,17 +4118,43 @@ class Game:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def load_config() -> dict[str, list[str]]:
+def load_config() -> tuple[dict[str, list[str]], dict]:
+    """Lee ~/.tomatoes/config.json (teclas y opciones) y lo reescribe completo."""
     path = CFG_DIR / "config.json"
     cfg = load_json(path, None)
-    if not isinstance(cfg, dict) or not isinstance(cfg.get("keys"), dict):
-        save_json(path, {"keys": DEFAULT_KEYS})
-        return dict(DEFAULT_KEYS)
     keys = dict(DEFAULT_KEYS)
-    for k, v in cfg["keys"].items():
-        if k in keys and isinstance(v, list) and all(isinstance(x, str) for x in v):
-            keys[k] = v
-    return keys
+    opts = dict(OPT_DEFAULT)
+    if isinstance(cfg, dict):
+        for k, v in (cfg.get("keys") or {}).items():
+            if k in keys and isinstance(v, list) and all(isinstance(x, str) for x in v):
+                keys[k] = v
+        for k, v in (cfg.get("options") or {}).items():
+            if k in opts and type(v) is type(opts[k]):
+                opts[k] = v
+            elif k == "last_name" and isinstance(v, str):
+                opts[k] = v
+    if opts["difficulty"] not in DIFFICULTY:
+        opts["difficulty"] = "Normal"
+    save_json(path, {"keys": keys, "options": opts})
+    return keys, opts
+
+
+def load_records() -> list[dict]:
+    rec = load_json(CFG_DIR / "record.json", {})
+    top: list[dict] = []
+    if isinstance(rec, dict):
+        for e in rec.get("top", []) if isinstance(rec.get("top"), list) else []:
+            if isinstance(e, dict) and isinstance(e.get("score"), int) and isinstance(e.get("name"), str):
+                top.append({"name": e["name"][:3], "score": e["score"], "level": int(e.get("level", 0)), "diff": str(e.get("diff", "Normal"))})
+        best = rec.get("best", 0)
+        if not top and isinstance(best, int) and best > 0:  # récord del formato antiguo
+            top.append({"name": "???", "score": best, "level": 0, "diff": "Normal"})
+    top.sort(key=lambda e: -e["score"])
+    return top[:10]
+
+
+def save_records(top: list[dict]) -> None:
+    save_json(CFG_DIR / "record.json", {"best": top[0]["score"] if top else 0, "top": top})
 
 
 def make_screen(headless: bool) -> pygame.Surface:
@@ -3353,7 +4186,7 @@ class Bot:
         if t.state == "tele" and t.attack == "jet":
             if t.jet_high:
                 held.add("down")
-            elif t.timer > TELE["jet"] - 0.06:
+            elif t.timer > t.tele("jet") - 0.06:
                 presses.append("jump")
                 held.add("jump")
             return held, presses
@@ -3373,13 +4206,20 @@ class Bot:
             if t.phase == "fall" and r.dash_cd <= 0:
                 presses.append("dash")
             return held, presses
+        for c in g.cherries:
+            if c["y"] >= FLOOR - CHERRY_R - 2 and abs(c["x"] - r.x) < 80:
+                held.update({"down", "right" if c["x"] > r.x else "left"})
+                if g.t >= self.next_punch:
+                    presses.append("jab")
+                    self.next_punch = g.t + 0.2
+                return held, presses
         target = t.x + side * (rx + RUFO_W / 2 + 6)
         if abs(r.x - target) > 18:
             held.add("right" if target > r.x else "left")
         elif g.t >= self.next_punch:
             held.add("left" if side > 0 else "right")
-            presses.append(random.choice(["jab", "jab", "hook"]))
-            self.next_punch = g.t + 0.16
+            presses.append("hook" if t.armor > 0 else random.choice(["jab", "jab", "hook"]))
+            self.next_punch = g.t + (0.3 if t.armor > 0 else 0.16)
         return held, presses
 
 
@@ -3457,12 +4297,255 @@ def run_headless(seconds: float, shots: Path | None = None) -> dict:
         "hearts": g.hearts,
         "draw_ms_avg": sum(draw_ms) / max(1, len(draw_ms)),
         "draw_ms_p95": sorted(draw_ms)[int(len(draw_ms) * 0.95)] if draw_ms else 0,
+        "draw_ms_max": max(draw_ms, default=0),
         "shots": taken,
         "audio": audio.ok,
         "state": g.state,
     }
+    g.tart.close()
     pygame.quit()
     return res
+
+
+def _test_game() -> Game:
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    os.environ["SDL_AUDIODRIVER"] = "dummy"
+    pygame.init()
+    return Game(make_screen(True), Audio(False), DEFAULT_KEYS)
+
+
+def _arena(g: Game, level: int, attacks: list[str] | None = None, x: float = 900.0) -> Tomato:
+    """Partida preparada: tomate ya en el suelo, quieto salvo que se den ataques."""
+    g.new_game()
+    g.banner = None
+    g.level = level
+    t = g.tomato = Tomato(level, x=x, diff=g.diff())
+    t.state = "idle"
+    t.y = FLOOR - t.radii()[1]
+    t.pause = 0.0 if attacks else 99.0
+    if attacks:
+        t.attacks = attacks
+    return t
+
+
+def _run(g: Game, secs: float, held=(), until=None) -> bool:
+    g.inp.virtual = set(held)
+    for _ in range(int(secs * PHYS_HZ)):
+        g.hitstop = 0.0
+        g.step(DT)
+        if until is not None and until():
+            return True
+    return False
+
+
+def mechanics(check) -> None:
+    """Comprueba las mecánicas una a una con entradas simuladas."""
+    global CFG_DIR
+    CFG_DIR = Path(tempfile.mkdtemp(prefix="tomatoes-"))
+    random.seed(5)
+    g = _test_game()
+    # Golpe cargado
+    _arena(g, 1)
+    r = g.rufo
+    g.press("jab")
+    _run(g, 0.9, {"jab"})
+    check(r.state == "charge", "mantener J carga el golpe")
+    _run(g, 0.02)
+    check(r.state == "attack" and r.atk == "charge" and r.atk_dmg == 5, "al soltar sale el cargado con daño según la carga")
+    # Cadena contra el tomate
+    t = _arena(g, 1)
+    r = g.rufo
+    r.x = t.x - t.radii()[0] - 60
+    _run(g, 0.4, {"right"})
+    seq = []
+    for k in ("jab", "jab", "hook", "jab"):
+        g.press(k)
+        _run(g, 0.5, until=lambda: r.state == "attack" and r.phase()[0] == "rc")
+        seq.append(r.atk)
+    check(seq == ["jab", "jab", "hook", "upper"], "cadena " + " → ".join(seq))
+    check(t.hp < t.maxhp and g.combo >= 3, "los golpes conectan y suben el combo")
+    # Trepar: doble salto + ascendente con rebote
+    t = _arena(g, 1, x=640)
+    r = g.rufo
+    r.x = t.x - t.radii()[0] - 30
+    for i in range(int(3 * PHYS_HZ)):  # como un jugador: salta, y en cada cima, doble salto o ascendente
+        held = {"jump", "right"}
+        if r.on_ground and not r.on_tomato:
+            g.press("jump")
+        elif r.vy > -60 and r.state == "normal":
+            if r.air_jumps > 0:
+                g.press("jump")
+            else:
+                held.add("up")
+                g.press("jab")
+        _run(g, DT, held)
+        if r.on_tomato:
+            break
+    check(r.on_tomato, "doble salto + ascendente con rebote: Rufo trepa a la corona")
+    # Rodada atravesada con la esquiva
+    t = _arena(g, 1, ["roll"], x=700)
+    r = g.rufo
+    r.x = 300
+    for _ in range(600):
+        if t.state == "atk" and t.phase == "go" and abs(r.x - t.x) < t.radii()[0] + 80 and r.state != "dash" and r.dash_cd <= 0:
+            g.press("dash")
+        _run(g, DT)
+        if t.state == "stun":
+            break
+    check(g.hearts == MAX_HEARTS and g.stats["perfect"] >= 1, "la esquiva atraviesa la rodada (esquiva perfecta)")
+    # Chorro bajo: se salta
+    t = _arena(g, 3, ["jet"], x=900)
+    r = g.rufo
+    r.x = 400
+    for _ in range(300):
+        if t.state == "tele":
+            t.jet_high = False
+            if t.timer > t.tele("jet") - 0.08:
+                g.press("jump")
+        _run(g, DT, {"jump"})
+        if t.state == "stun":
+            break
+    check(g.hearts == MAX_HEARTS, "el chorro bajo se esquiva saltando")
+    # Tomate verde blindado
+    t = _arena(g, 4)
+    r = g.rufo
+    r.x = t.x - t.radii()[0] - 60
+    _run(g, 0.4, {"right"})
+    g.press("jab")
+    _run(g, 0.3)
+    check(t.hp == t.maxhp and t.armor < t.max_armor, "tomate verde: el jab rebota en la coraza")
+    for _ in range(24):
+        _run(g, 0.1, {"right"})
+        g.press("hook")
+        _run(g, 0.4)
+        if t.armor <= 0:
+            break
+    check(t.armor <= 0 and t.hp < t.maxhp, "los ganchos rompen la coraza y el tomate madura")
+    # Tomate podrido: los charcos resbalan
+    stop = []
+    for slick in (False, True):
+        _arena(g, 6)
+        r = g.rufo
+        r.x, r.vx = 400.0, RUN_MAX
+        if slick:
+            g.add_puddle(450, 120)
+        _run(g, 1.0)
+        stop.append(r.x - 400)
+    check(stop[1] > stop[0] * 4, f"charco del podrido: frenada de {stop[0]:.0f} a {stop[1]:.0f} px")
+    # Cherrys
+    _arena(g, 7)
+    r = g.rufo
+    r.x = 500
+    g.cherries.append({"x": 540.0, "y": FLOOR - CHERRY_R, "vx": 0.0, "vy": 0.0, "t": 0.0, "hop": 9.0, "id": "c", "sq": Spring(260, 10), "face": -1})
+    _run(g, DT, {"down"})
+    g.press("jab")
+    _run(g, 0.3, {"down"})
+    check(not g.cherries and g.score > 0, "el jab agachado revienta una cherry")
+    _arena(g, 7, ["cherry"], x=1000)
+    g.rufo.x = 300
+    check(_run(g, 7.0, until=lambda: g.hearts < MAX_HEARTS), "las cherrys persiguen a Rufo y hacen daño")
+    # Menú, opciones y récords en disco
+    g.to_title()
+    g.menu_input(["down"])
+    g.menu_input(["right"])
+    check(g.diff_name == "Difícil", "el menú cambia la dificultad")
+    g2 = Game(g.screen, Audio(False), *load_config())
+    check(g2.diff_name == "Difícil" and Tomato(1, diff=g2.diff()).pause < 3.0, "las opciones se guardan y afectan al tomate")
+    g.new_game()
+    g.score = 1234
+    g.game_over()
+    check(g.entering, "una puntuación de la tabla pide iniciales")
+    for ch in "ABC":
+        g.name_input(pygame.event.Event(pygame.KEYDOWN, key=0, unicode=ch, mod=0, scancode=0), [])
+    g.name_input(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r", mod=0, scancode=0), [])
+    top = load_records()
+    check(bool(top) and top[0]["name"] == "ABC" and top[0]["score"] == 1234, "la tabla de récords se guarda con iniciales")
+    # Modo demo
+    g.to_title()
+    g.idle_t = DEMO_IDLE + 1
+    g.update(1 / 60)
+    check(g.state == "play" and g.demo, "el título lanza el modo demo si nadie toca nada")
+    g.handle(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, unicode=" ", mod=0, scancode=0))
+    check(g.state == "title", "cualquier tecla corta la demo")
+    # Niveles especiales jugados por el bot, con dibujo incluido
+    bot = Bot()
+    for lvl in (4, 6, 7, 8):
+        t = _arena(g, lvl)
+        t.pause = 0.6
+        for i in range(60 * 8):
+            held, presses = bot.act(g)
+            g.inp.virtual = held
+            for a in presses:
+                g.press(a)
+            g.update(1 / 60)
+            if i % 6 == 0:
+                g.draw()
+            if g.state != "play":
+                break
+        check(True, f"nivel {lvl} ({KIND_NAMES[tomato_kind(lvl)].lower()}) jugado y dibujado sin errores")
+    g.tart.close()
+    g2.tart.close()
+    pygame.quit()
+
+
+def gallery(out: Path) -> list[str]:
+    """Capturas de las situaciones más vistosas (para el README y la CI)."""
+    global CFG_DIR
+    CFG_DIR = Path(tempfile.mkdtemp(prefix="tomatoes-"))
+    out.mkdir(parents=True, exist_ok=True)
+    random.seed(3)
+    g = _test_game()
+    bot = Bot()
+    names: list[str] = []
+
+    def ready() -> None:
+        for f in list(g.tart.pending.values()):
+            f.result()
+        g.tart.poll()
+
+    def shot(name: str) -> None:
+        ready()
+        if g.tomato is not None:
+            g.tomato.flash = 0.0  # sin el destello del último impacto
+        g.flash = 0.0
+        g.draw()
+        pygame.image.save(g.screen, str(out / f"{name}.png"))
+        names.append(name)
+
+    def play(secs: float, until=None) -> None:
+        for _ in range(int(secs * 60)):
+            held, presses = bot.act(g)
+            g.inp.virtual = held
+            for a in presses:
+                g.press(a)
+            g.update(1 / 60)
+            if until is not None and until():
+                return
+
+    for _ in range(80):
+        g.update(1 / 60)
+    shot("menu")
+    for level, attacks, secs, name in ((4, ["roll", "jet"], 5.0, "verde"), (6, ["roll"], 6.0, "podrido"), (9, ["seeds"], 3.0, "pepitas")):
+        t = _arena(g, level, attacks, x=820)
+        g.tart.warm(t)
+        play(secs)
+        shot(name)
+    t = _arena(g, 7, ["cherry"], x=950)
+    g.tart.warm(t)
+    play(4.0, until=lambda: len(g.cherries) >= 3 and all(c["y"] > FLOOR - 120 for c in g.cherries))
+    shot("cherrys")
+    t = _arena(g, 5, x=760)
+    g.tart.warm(t)
+    t.hp = int(t.maxhp * 0.2)
+    for _ in range(9):
+        t.take_hit(random.uniform(-2.8, 0.6), 0, 0, False)
+    t.flash = 0
+    g.rufo.x = 380
+    play(1.2)
+    shot("furia")
+    g.tart.close()
+    pygame.quit()
+    return names
 
 
 def selftest() -> int:
@@ -3487,12 +4570,14 @@ def selftest() -> int:
     check(t9.r == 320 and abs(t9.pause - 1.2) < 1e-9 and "seeds" in t9.attacks, "topes de escalado a nivel alto")
     check(all(angle_ok(random_weak_angle()) for _ in range(200)), "el punto débil nunca cae debajo")
     check(rect_ellipse(pygame.Rect(95, -5, 10, 10), 0, 0, 100, 50) and not rect_ellipse(pygame.Rect(120, 0, 5, 5), 0, 0, 100, 50), "colisión rectángulo–elipse")
+    mechanics(check)
     # Partida completa con bot
     res = run_headless(150.0)
     print("  partida:", {k: v for k, v in res.items() if k != "shots"})
     check(res["tomatoes"] >= 1, "el bot revienta al menos un tomate")
     check(res["state"] == "over", "la partida termina en la pantalla final")
     check(res["draw_ms_avg"] < 60, "render por debajo de 60 ms por fotograma (CPU, sin GPU)")
+    check(res["draw_ms_max"] < 100, "sin tirones: el tomate se hornea en segundo plano")
     print("RESULTADO:", "OK" if ok else "FALLO")
     return 0 if ok else 1
 
@@ -3507,7 +4592,8 @@ def main(argv: list[str] | None = None) -> int:
         return selftest()
     if args.shots:
         res = run_headless(60.0, args.shots)
-        print("capturas:", ", ".join(res["shots"]), "→", args.shots)
+        extra = gallery(args.shots)
+        print("capturas:", ", ".join(res["shots"] + extra), "→", args.shots)
         return 0
     headless = os.environ.get("SDL_VIDEODRIVER") == "dummy"
     pygame.init()
@@ -3517,7 +4603,13 @@ def main(argv: list[str] | None = None) -> int:
     except pygame.error:
         pass
     audio = Audio(enabled=not args.mute)
-    g = Game(screen, audio, load_config())
+    keys, opts = load_config()
+    g = Game(screen, audio, keys, opts)
+    if opts["fullscreen"] and not headless:
+        try:
+            pygame.display.toggle_fullscreen()
+        except pygame.error:
+            pass
     clock = pygame.time.Clock()
     while g.running:
         dt = clock.tick(240) / 1000
@@ -3527,6 +4619,7 @@ def main(argv: list[str] | None = None) -> int:
         g.draw()
         g.fps = clock.get_fps()
         pygame.display.flip()
+    g.tart.close()
     pygame.quit()
     return 0
 
