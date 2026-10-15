@@ -50,17 +50,31 @@ uv run pytomatoes.py
 | Moverse | `A` / `D` o `←` / `→` | Stick izquierdo / cruceta |
 | Saltar (doble salto en el aire) | `W`, `↑` o `Espacio` | A / ✕ |
 | Agacharse | `S` o `↓` | Abajo |
+| **Puños** | | |
 | Jab (mantener: golpe cargado) | `J` | X / □ |
-| Jab bajo (agachado) | `↓` + `J` | Abajo + X / □ |
+| Directo | `U` | LB / L1 |
 | Gancho | `K` | Y / △ |
 | Gancho ascendente | `↑` + `J` | Arriba + X / □ |
+| Jab bajo (agachado) | `↓` + `J` | Abajo + X / □ |
 | Martillo aéreo | `↓` + `J` en el aire | Abajo + X / □ en el aire |
+| **Patadas** | | |
+| Patada frontal | `I` | B / ○ |
+| Patada alta | `↑` + `I` | Arriba + B / ○ |
+| Barrida | `↓` + `I` | Abajo + B / ○ |
+| Patada voladora | `I` en el aire | B / ○ en el aire |
+| Patada giratoria (a los dos lados) | `O` | Back / Select |
+| **Defensa** | | |
 | Esquiva rápida | `Shift` o `L` | RB / R1 |
 | Pausa | `P` o `Esc` | Start |
 | Pantalla completa | `F11` | — |
 | Bloom on/off | `B` | — |
 | Silenciar | `M` | — |
+| Mostrar u ocultar las teclas en pantalla | `H` | — |
 | Depuración (cajas de colisión y estados) | `F3` | — |
+
+**El juego te enseña las teclas** de tres maneras: la pantalla **MOVIMIENTOS** del menú principal, la lista completa en la **pausa**, y una **barra de teclas** al pie de la pantalla durante la partida (`H` la oculta; también en Opciones). Además, cada golpe especial muestra su nombre sobre Rufo al hacerlo. Si reasignas teclas, todas estas guías enseñan las tuyas.
+
+![Pantalla de movimientos](docs/movimientos.jpg)
 
 En los menús: `W`/`S` o flechas para elegir, `A`/`D` para cambiar un valor, `J`/`Espacio`/`Intro` para aceptar y `Esc` para volver. El mando navega con la cruceta o el stick. En pausa, `Q` vuelve al menú. El juego se pausa solo si la ventana pierde el foco o se desconecta el mando.
 
@@ -71,7 +85,8 @@ En los menús: `W`/`S` o flechas para elegir, `A`/`D` para cambiar un valor, `J`
 ## Menú, opciones y récords
 
 - **Dificultad:** *Fácil* (avisos un 30 % más largos, más pausa entre ataques, golpes de Rufo un 25 % más fuertes; puntos ×0,75), *Normal* y *Difícil* (avisos más cortos, tomates más rápidos; puntos ×1,5).
-- **Opciones:** volumen de música y de efectos por separado, intensidad de la sacudida de cámara (0–100 %), destellos normales o reducidos (sin aberración cromática y con flashes suaves), bloom, vibración del mando, pantalla completa y tutorial. Todo se guarda al momento.
+- **Movimientos:** todos los puños y patadas con sus teclas (las que tengas configuradas) y los combos.
+- **Opciones:** volumen de música y de efectos por separado, intensidad de la sacudida de cámara (0–100 %), destellos normales o reducidos (sin aberración cromática y con flashes suaves), bloom, vibración del mando, pantalla completa, tutorial y teclas en pantalla. Todo se guarda al momento.
 - **Trucos:** un menú propio con interruptores que se guardan entre partidas:
 
   | Truco | Efecto |
@@ -156,12 +171,26 @@ Los tiempos están en fotogramas a 60 FPS: preparación, golpe activo y recupera
 |---|---|---|---|---|---|
 | **Jab** | `J` | 3 / 3 / 8 | 1 | 10 | Rápido y seguro; abre combos |
 | **Jab bajo** | `↓` + `J` | 3 / 3 / 8 | 1 | 10 | Barre a ras de suelo y mantiene a Rufo agachado (esquiva el chorro alto mientras golpea) |
+| **Directo** | `U` | 5 / 4 / 13 | 2 | 20 | Recto y largo, con el puño de atrás |
 | **Gancho** | `K` | 7 / 4 / 14 | 2 | 25 | Más alcance; empuja al tomate |
 | **Gancho ascendente** | `↑` + `J` | 6 / 5 / 16 | 2 | 25 | Golpea hacia arriba y eleva a Rufo una vez por salto |
 | **Golpe cargado** | Mantener `J` 0,4–1,2 s y soltar | — / 6 / 20 | 3–6 | 15 × daño | Rufo brilla dorado y es vulnerable mientras carga |
 | **Martillo aéreo** | `↓` + `J` en el aire | 5 / 8 / 18 | 3 | 40 | Picado sobre la corona del tomate |
 
+### Patadas
+
+Más lentas que los puños, pero con más alcance y mucho más empuje. Todas cuentan como golpe fuerte contra la coraza del tomate verde.
+
+| Patada | Entrada | Tiempos | Daño | Puntos | Notas |
+|---|---|---|---|---|---|
+| **Frontal** | `I` | 6 / 5 / 16 | 2 | 25 | La de más alcance; aparta al tomate |
+| **Alta** | `↑` + `I` | 7 / 5 / 18 | 3 | 35 | A la parte alta, donde suele estar el punto débil |
+| **Barrida** | `↓` + `I` | 5 / 6 / 16 | 2 | 25 | A ras de suelo y agachado: barre cherrys y esquiva el chorro alto |
+| **Voladora** | `I` en el aire | 4 / 10 / 16 | 3 | 40 | Picado en diagonal; rebota si da en lo alto |
+| **Giratoria** | `O` | 8 / 8 / 20 | 3 | 40 | Media vuelta: golpea delante **y detrás** |
+
 - **Cadena:** durante la recuperación de un golpe se puede lanzar el siguiente si la secuencia es válida: Jab → Jab → Gancho → Gancho ascendente. En el cuarto paso basta con `J`.
+- **Cancelaciones libres:** el Jab se puede cancelar en Directo o en cualquier patada; el Directo en Gancho o patada; el Gancho en patada; el Ascendente en Patada voladora, y la Frontal y la Barrida en Giratoria. Por ejemplo: Jab → Directo → Gancho → Patada giratoria.
 - **Búfer de entrada de 0,1 s:** si pulsas un poco antes de que termine la recuperación, el golpe sale igual.
 - **Pared:** si empujas al tomate contra una pared con un gancho o un golpe cargado, rebota y queda aturdido.
 
@@ -236,7 +265,7 @@ Decisiones clave:
 
 `python pytomatoes.py --selftest` comprueba, con entradas simuladas:
 
-- el golpe cargado, la cadena de golpes y que se puede trepar al tomate;
+- el golpe cargado, la cadena de golpes, que cada puño y patada sale con su tecla y conecta, que la giratoria pega hacia atrás, las cancelaciones y que se puede trepar al tomate;
 - que la esquiva atraviesa la rodada y que el chorro bajo se salta;
 - la coraza del tomate verde, los charcos del podrido y las cherrys;
 - el menú, que las opciones, los trucos y los récords se guardan, que con trucos no se entra en la tabla, y el modo demo;

@@ -15,8 +15,10 @@ externos: gráficos, luces, partículas, música y efectos se generan por códig
     python pytomatoes.py --shots DIR   # capturas PNG de cada pantalla (CI)
 
 Controles: A/D o ←/→ moverse · W/↑/Espacio saltar (doble salto) · S/↓ agacharse
-J jab (mantener: golpe cargado) · ↓+J jab bajo · K gancho · ↑+J gancho ascendente
-↓+J en el aire: martillo · Shift/L esquiva · P/Esc pausa · F11 pantalla completa
+J jab (mantener: golpe cargado) · U directo · K gancho · ↑+J gancho ascendente
+↓+J jab bajo (en el aire: martillo) · I patada · ↑+I patada alta · ↓+I barrida
+I en el aire: patada voladora · O patada giratoria · H teclas en pantalla
+Shift/L esquiva · P/Esc pausa · F11 pantalla completa
 B bloom · M silencio · F3 depuración.
 
 Menú con dificultad, opciones (volúmenes, sacudida, destellos, vibración…),
@@ -84,6 +86,37 @@ ATTACKS: dict[str, dict] = {
     "upper": dict(f=(6, 5, 16), dmg=2, pts=25, box=(-2, -116, 48, -40), stop=0.05, shake=0.3, knock=40, snd="hook"),
     "charge": dict(f=(0, 6, 20), dmg=3, pts=15, box=(4, -70, 84, -24), stop=0.07, shake=0.5, knock=300, snd="heavy"),
     "hammer": dict(f=(5, 8, 18), dmg=3, pts=40, box=(-30, -26, 36, 34), stop=0.06, shake=0.45, knock=0, snd="heavy"),
+    "cross": dict(f=(5, 4, 13), dmg=2, pts=20, box=(8, -66, 76, -36), stop=0.045, shake=0.24, knock=130, snd="hook"),
+    # Patadas: más alcance y más empuje que los puños
+    "kick": dict(f=(6, 5, 16), dmg=2, pts=25, box=(6, -52, 82, -16), stop=0.05, shake=0.3, knock=280, snd="kick"),
+    "highkick": dict(f=(7, 5, 18), dmg=3, pts=35, box=(-2, -112, 66, -52), stop=0.055, shake=0.34, knock=90, snd="kick"),
+    "sweep": dict(f=(5, 6, 16), dmg=2, pts=25, box=(-8, -32, 98, 2), stop=0.045, shake=0.26, knock=110, snd="kick"),
+    "airkick": dict(f=(4, 10, 16), dmg=3, pts=40, box=(0, -34, 60, 22), stop=0.06, shake=0.42, knock=150, snd="heavy"),
+    "spin": dict(f=(8, 8, 20), dmg=3, pts=40, box=(-80, -72, 80, -28), stop=0.06, shake=0.45, knock=220, snd="spin"),
+}
+KICKS = {"kick", "highkick", "sweep", "airkick", "spin"}
+DIVES = {"hammer", "airkick"}  # golpes en picado: terminan al tocar el suelo
+MOVE_NAMES = {
+    "jab": "Jab",
+    "cross": "Directo",
+    "hook": "Gancho",
+    "upper": "Gancho ascendente",
+    "charge": "Golpe cargado",
+    "hammer": "Martillo",
+    "kick": "Patada frontal",
+    "highkick": "Patada alta",
+    "sweep": "Barrida",
+    "airkick": "Patada voladora",
+    "spin": "Patada giratoria",
+}
+# Cancelaciones libres desde la recuperación de un golpe (además de la cadena clásica)
+CANCELS = {
+    "jab": {"cross", "kick", "highkick", "sweep", "spin"},
+    "cross": {"hook", "kick", "highkick", "spin"},
+    "hook": {"kick", "highkick", "spin"},
+    "upper": {"airkick"},
+    "kick": {"spin"},
+    "sweep": {"kick", "spin"},
 }
 
 # Tomate
@@ -111,8 +144,9 @@ OPT_DEFAULT: dict = {
     "rumble": True,
     "fullscreen": False,
     "tutorial": True,
+    "help": True,
 }
-MENU_MAIN = ["JUGAR", "DIFICULTAD", "OPCIONES", "TRUCOS", "RÉCORDS", "SALIR"]
+MENU_MAIN = ["JUGAR", "DIFICULTAD", "MOVIMIENTOS", "OPCIONES", "TRUCOS", "RÉCORDS", "SALIR"]
 # Trucos: (texto del menú, clave). Con cualquiera activo (salvo los estéticos)
 # la puntuación no entra en la tabla de récords.
 CHEATS = [
@@ -139,7 +173,7 @@ CHEAT_DEFAULT: dict = {
 }
 COSMETIC_CHEATS = {"bighead", "rainbow"}
 MENU_CHEATS = [c[0] for c in CHEATS] + ["Desactivar todos", "Volver"]
-MENU_OPTIONS = ["Dificultad", "Música", "Efectos", "Sacudida de cámara", "Destellos", "Bloom", "Vibración del mando", "Pantalla completa", "Tutorial", "Volver"]
+MENU_OPTIONS = ["Dificultad", "Música", "Efectos", "Sacudida de cámara", "Destellos", "Bloom", "Vibración del mando", "Pantalla completa", "Tutorial", "Teclas en pantalla", "Volver"]
 DEMO_IDLE = 20.0  # segundos quieto en el título antes del modo demo
 
 
@@ -173,7 +207,11 @@ DEFAULT_KEYS: dict[str, list[str]] = {
     "down": ["s", "down"],
     "jump": ["w", "up", "space"],
     "jab": ["j"],
+    "cross": ["u"],
     "hook": ["k"],
+    "kick": ["i"],
+    "spin": ["o"],
+    "help": ["h"],
     "dash": ["left shift", "right shift", "l"],
     "pause": ["p", "escape"],
     "fullscreen": ["f11"],
@@ -182,8 +220,9 @@ DEFAULT_KEYS: dict[str, list[str]] = {
     "debug": ["f3"],
     "confirm": ["return", "space", "j"],
 }
-# Mando con mapeo SDL estándar (Xbox): A=0, X=2, Y=3, RB=5, Start=7
-PAD_BUTTONS: dict[int, list[str]] = {0: ["jump", "confirm"], 2: ["jab", "confirm"], 3: ["hook"], 5: ["dash"], 7: ["pause"]}
+# Mando con mapeo SDL estándar (Xbox): A=0, B=1, X=2, Y=3, LB=4, RB=5, Back=6, Start=7
+PAD_BUTTONS: dict[int, list[str]] = {0: ["jump", "confirm"], 1: ["kick"], 2: ["jab", "confirm"], 3: ["hook"], 4: ["cross"], 5: ["dash"], 6: ["spin"], 7: ["pause"]}
+PAD_NAMES = {"jump": "A", "kick": "B", "jab": "X", "hook": "Y", "cross": "LB", "dash": "RB", "spin": "Back", "pause": "Start"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -490,6 +529,9 @@ class Audio:
         s["seed_hit"] = self._mk(sweep(1400, 700, 0.05) * env(0.05, 60), 0.3)
         s["over"] = self._mk(chime([523, 415, 330, 262], 0.16, 0.6), 0.5)
         s["wall"] = self._mk(thud(110, 40, 0.3, 12, 0.3, 400), 0.7)
+        s["kick"] = self._mk(add(thud(140, 42, 0.26, 15, 0.6, 700), filt(noise(0.1), lo=300, hi=1500) * env(0.1, 30) * 0.5), 0.75)
+        swirl = filt(noise(0.3), lo=500, hi=3500) * np.sin(np.pi * T(0.3) / 0.3) ** 2 * (0.6 + 0.4 * np.sin(T(0.3) * 2 * np.pi * 18))
+        s["spin"] = self._mk(add(swirl * 0.7, thud(120, 36, 0.4, 9, 0.6, 600)), 0.85)
         pop = add(sweep(260, 950, 0.07, "tri") * env(0.07, 40), filt(noise(0.05), lo=1500) * env(0.05, 120) * 0.5)
         s["pop"] = self._mk(pop, 0.45)
         trio = np.zeros(int(sr * 0.6))
@@ -763,7 +805,7 @@ class Rufo:
         if self.state != "attack" or self.phase()[0] != "ac":
             return None
         x0, y0, x1, y1 = ATTACKS[self.atk]["box"]
-        if self.atk_low:  # jab agachado: barre a ras de suelo
+        if self.atk_low and self.atk == "jab":  # jab agachado: barre a ras de suelo
             y0, y1 = -34, -4
         if self.facing < 0:
             x0, x1 = -x1, -x0
@@ -786,7 +828,10 @@ class Rufo:
         self.atk_t = 0.0
         self.atk_hit = False
         self.atk_fired = False
-        self.atk_low = name == "jab" and self.crouch
+        self.atk_low = (name == "jab" and self.crouch) or name == "sweep"
+        if name not in ("jab", "charge"):
+            label = "Jab bajo" if self.atk_low and name == "jab" else MOVE_NAMES[name]
+            g.move_name(label)
         self.trail.clear()
         if name == "charge":
             self.atk_dmg = 3 + round(3 * clamp((self.j_hold - 0.4) / 0.8, 0, 1))
@@ -892,7 +937,9 @@ class Rufo:
 
         free = self.state in ("normal", "charge")
         in_rc = self.state == "attack" and self.phase()[0] == "rc"
-        self.crouch = down and self.on_ground and (self.state in ("normal", "charge") or (self.state == "attack" and self.atk_low))
+        self.crouch = (down and self.on_ground and (self.state in ("normal", "charge") or (self.state == "attack" and self.atk_low))) or (
+            self.state == "attack" and self.atk == "sweep"
+        )
         self.cr.target = 1.0 if self.crouch else 0.0
         if free and mx:
             self.facing = mx
@@ -937,12 +984,26 @@ class Rufo:
             key = "jab"
         elif g.peek("hook"):
             want, key = "hook", "hook"
+        elif g.peek("cross"):
+            want, key = "cross", "cross"
+        elif g.peek("kick"):
+            key = "kick"
+            if not self.on_ground:
+                want = "airkick"
+            elif down:
+                want = "sweep"
+            elif up:
+                want = "highkick"
+            else:
+                want = "kick"
+        elif g.peek("spin"):
+            want, key = "spin", "spin"
         if want is not None:
             started = None
             if self.state == "normal":
                 started = want
             elif in_rc:
-                started = self.chain_ok(want)
+                started = self.chain_ok(want) or (want if want in CANCELS.get(self.atk, ()) else None)
             if started:
                 g.consume(key)
                 if key == "jab":
@@ -973,6 +1034,13 @@ class Rufo:
                     if self.atk == "hammer":
                         self.vy = 1400.0
                         self.vx *= 0.3
+                    elif self.atk == "airkick":
+                        self.vy = 950.0
+                        self.vx = self.facing * 680.0
+                    elif self.atk in ("kick", "highkick") and self.on_ground:
+                        self.vx += self.facing * 120
+                    elif self.atk == "spin":
+                        g.fx.ring(self.x, self.y - 40, 70, (255, 230, 200), 0.25, 4, flat=0.35)
                     elif self.atk == "upper" and self.upper_lift:
                         self.upper_lift = False
                         self.vy = min(self.vy, -560.0)
@@ -1011,7 +1079,7 @@ class Rufo:
                 grav *= CUT_MULT  # salto de altura variable
             elif self.vy > 0:
                 grav *= FALL_MULT
-            if self.state == "attack" and self.atk == "hammer" and self.phase()[0] == "su":
+            if self.state == "attack" and self.atk in DIVES and self.phase()[0] == "su":
                 grav *= 0.15  # se queda suspendido un instante antes del picado
                 self.vy *= 0.85
             self.vy = min(self.vy + grav * dt, MAX_FALL)
@@ -1043,7 +1111,7 @@ class Rufo:
             self.y = float(FLOOR)
             if self.vy > 0:
                 self.land(g, self.vy)
-                if self.state == "attack" and self.atk == "hammer" and self.phase()[0] in ("su", "ac"):
+                if self.state == "attack" and self.atk in DIVES and self.phase()[0] in ("su", "ac"):
                     g.hammer_ground(self)
             self.vy = 0.0
             self.on_ground = True
@@ -1089,10 +1157,35 @@ def glove_pose(r: Rufo) -> dict:
         gb = (8.0, -13 - bob)
     elif r.state == "normal":
         gf, gb = ((17.0, -15.0), (5.0, -20.0)) if r.vy < 0 else ((18.0, -6.0), (-2.0, -9.0))
-    if r.state == "attack":
+    kick = None
+    spin_flip = False
+    if r.state == "attack" and r.atk in KICKS:
+        ph, p = r.phase()
+        wind, ext = {
+            "kick": ((8, -12), (56, -30)),
+            "highkick": ((4, -18), (42, -76)),
+            "sweep": ((6, -4), (62, -4)),
+            "airkick": ((10, -8), (40, 16)),
+            "spin": ((-6, -14), (58, -42)),
+        }[r.atk]
+        rest = (7.0, 0.0)
+        if ph == "su":
+            kick = lerp2(rest, wind, ease_out(p))
+        elif ph == "ac":
+            kick = lerp2(wind, ext, back_out(min(1.0, p * 1.8)))
+            mouth = "grit"
+            spin_flip = r.atk == "spin" and p < 0.45  # media vuelta antes de soltar la pierna
+        else:
+            kick = lerp2(ext, rest, smooth(p))
+        lean -= {"su": 0.08, "ac": 0.22, "rc": 0.08, "end": 0.0}[ph] * (0.4 if r.atk == "airkick" else 1)
+        if r.atk == "airkick":
+            lean = -0.3  # en plancha hacia atrás, el pie por delante
+        gf, gb = (12.0, -16.0), (2.0, -20.0)
+    elif r.state == "attack":
         ph, p = r.phase()
         k = r.atk
         wind, ext, ctrl, arm = {
+            "cross": ((-6, -6), (56, -8), None, "b"),
             "jab": ((9, -5), (47, -7), None, "f"),
             "hook": ((-12, -4), (46, -14), (30, -36), "b"),
             "upper": ((6, 12), (18, -44), (30, 0), "f"),
@@ -1134,12 +1227,15 @@ def glove_pose(r: Rufo) -> dict:
         mouth = "o"
     elif r.state == "dead":
         mouth = "o"
-    return {"gf": gf, "gb": gb, "lean": lean, "sh_y": sh_y, "cr": cr, "mouth": mouth}
+    return {"gf": gf, "gb": gb, "lean": lean, "sh_y": sh_y, "cr": cr, "mouth": mouth, "kick": kick, "spin_flip": spin_flip}
 
 
 def glove_world(r: Rufo) -> tuple[float, float]:
     p = glove_pose(r)
-    arm = "b" if r.atk in ("hook", "charge") else "f"
+    if p["kick"] is not None:  # la estela sigue al pie
+        fx, fy = p["kick"]
+        return (r.x + fx * r.facing, r.y + fy)
+    arm = "b" if r.atk in ("hook", "charge", "cross") else "f"
     g = p["gb"] if arm == "b" else p["gf"]
     sx = 3 if arm == "f" else -5
     return (r.x + (sx + g[0]) * r.facing, r.y + p["sh_y"] + g[1])
@@ -2410,7 +2506,7 @@ class RufoArt:
         cv = self.big
         cv.fill((0, 0, 0, 0))
         pose = glove_pose(r)
-        fc = r.facing
+        fc = -r.facing if pose["spin_flip"] else r.facing
         s = clamp(r.sq.x, -0.3, 0.35)
         sxk, syk = 1 + s * 0.8, 1 - s
         lean = pose["lean"] * fc
@@ -2454,6 +2550,11 @@ class RufoArt:
             else:
                 fx, fy = hx * (1 + cr * 0.8), 0.0
             knee = ((hx + fx) / 2 + 3 + cr * 7, (hip_y + fy) / 2 - cr * 2)
+            if side > 0 and pose["kick"] is not None:
+                fx, fy = pose["kick"]
+                reach = math.hypot(fx - hx, fy - hip_y)
+                bend = max(0.0, 26 - reach) * 0.5  # rodilla doblada al recoger la pierna
+                knee = ((hx + fx) / 2 + bend * 0.3, (hip_y + fy) / 2 - 4 - bend)
             legs.append((side, (hx, hip_y), knee, (fx, fy)))
         for side, hip, knee, foot in legs:
             k = 0.78 if side < 0 else 1.0
@@ -2863,6 +2964,17 @@ class Game:
         """Valor de un truco; en la demo no hay trucos."""
         return CHEAT_DEFAULT[key] if self.demo else self.cheats[key]
 
+    def move_name(self, label: str) -> None:
+        """Nombre del golpe sobre Rufo: así se aprenden los movimientos."""
+        if self.opts["help"] and self.state == "play" and not self.demo:
+            r = self.rufo
+            self.fx.text(r.x, r.y - 128, label, (255, 236, 190), 22, 0.55, -60)
+
+    def key_label(self, action: str) -> str:
+        names = self.keymap.get(action) or ["?"]
+        pretty = {"left shift": "SHIFT", "right shift": "SHIFT", "space": "ESPACIO", "escape": "ESC", "return": "INTRO", "up": "ARRIBA", "down": "ABAJO", "left": "IZQ.", "right": "DCHA."}
+        return pretty.get(names[0], names[0].upper())
+
     def dress(self, t: "Tomato") -> None:
         t.big_weak = self.cheat("bigweak")
         t.rainbow = self.cheat("rainbow")
@@ -2908,6 +3020,7 @@ class Game:
             "Vibración del mando": "Sí" if o["rumble"] else "No",
             "Pantalla completa": "Sí" if o["fullscreen"] else "No",
             "Tutorial": "Sí" if o["tutorial"] else "No",
+            "Teclas en pantalla": "Sí" if o["help"] else "No",
         }.get(item, "") or self.cheat_value(item)
 
     def change_option(self, item: str, d: int) -> None:
@@ -2937,6 +3050,8 @@ class Game:
                 pass
         elif item == "Tutorial":
             o["tutorial"] = not o["tutorial"]
+        elif item == "Teclas en pantalla":
+            o["help"] = not o["help"]
         elif item in dict(CHEATS):
             self.change_cheat(item, d)
             if self.state == "title":
@@ -2946,9 +3061,9 @@ class Game:
         self.save_opts()
 
     def menu_input(self, acts: list[str]) -> None:
-        if self.menu == "records":
+        if self.menu in ("records", "moves"):
             if "confirm" in acts or "pause" in acts:
-                self.menu, self.cursor = "main", MENU_MAIN.index("RÉCORDS")
+                self.menu, self.cursor = "main", MENU_MAIN.index("RÉCORDS" if self.menu == "records" else "MOVIMIENTOS")
                 self.audio.play("select")
             return
         items = {"main": MENU_MAIN, "options": MENU_OPTIONS, "cheats": MENU_CHEATS}[self.menu]
@@ -2970,6 +3085,9 @@ class Game:
                 self.audio.play("select")
             elif item == "TRUCOS":
                 self.menu, self.cursor = "cheats", 0
+                self.audio.play("select")
+            elif item == "MOVIMIENTOS":
+                self.menu = "moves"
                 self.audio.play("select")
             elif item == "Desactivar todos":
                 self.cheats = dict(CHEAT_DEFAULT)
@@ -3026,7 +3144,9 @@ class Game:
         if self.tip is not None and self.tip[1] > 1.2:
             return  # deja leer el consejo actual
         if self.sub_t > 1.0:
-            self.show_tip("hit", "Acércate y golpea:  J jab  ·  K gancho  ·  Abajo+J jab bajo")
+            self.show_tip("hit", "Acércate y golpea:  J jab  ·  U directo  ·  K gancho")
+        if self.sub_t > 9.0:
+            self.show_tip("kick", "¡Patadas!  I frontal  ·  O giratoria  ·  Abajo+I barrida  ·  Arriba+I alta")
         if t.state == "tele" and t.attack == "roll":
             self.show_tip("roll", "¡Va a rodar! Shift lo atraviesa con la esquiva (o salta encima)")
         elif t.state == "tele" and t.attack == "bounce":
@@ -3088,6 +3208,8 @@ class Game:
                 self.audio.toggle_mute()
             elif a == "debug":
                 self.debug = not self.debug
+            elif a == "help" and self.state == "play":
+                self.change_option("Teclas en pantalla", 1)
         if self.state == "title":
             if acts:
                 self.idle_t = 0.0
@@ -3104,7 +3226,7 @@ class Game:
                     self.paused = False
                 return
             for a in acts:
-                if a in ("jump", "jab", "hook", "dash"):
+                if a in ("jump", "jab", "hook", "dash", "cross", "kick", "spin"):
                     self.press(a)
         elif self.state == "over" and self.over_t > 0.8:
             if "confirm" in acts:
@@ -3363,8 +3485,8 @@ class Game:
             r.air_jumps = 1
             r.air_dash = True
             r.jumping = False
-            if r.atk == "hammer":
-                r.atk_t = sum(ATTACKS["hammer"]["f"][:2]) * FRAME
+            if r.atk in DIVES:
+                r.atk_t = sum(ATTACKS[r.atk]["f"][:2]) * FRAME
         # Sensaciones
         stop = 0.06 if crit else a["stop"]
         if r.atk == "charge":
@@ -3524,7 +3646,7 @@ class Game:
         self.shake(0.2)
         self.fx.puff(r.x, r.y, 10)
         self.fx.ring(r.x, r.y + 4, 90, (200, 190, 180), 0.3, 3, flat=0.25)
-        r.atk_t = max(r.atk_t, sum(ATTACKS["hammer"]["f"][:2]) * FRAME)
+        r.atk_t = max(r.atk_t, sum(ATTACKS[r.atk]["f"][:2]) * FRAME)
 
     def hazard_touch(self, hid: str, from_x: float, juice: bool = False) -> None:
         r = self.rufo
@@ -4020,6 +4142,8 @@ class Game:
                 self.draw_banner(scr)
             if self.tip and self.state == "play":
                 self.draw_tip(scr)
+            if self.state == "play" and self.opts["help"] and not self.demo and not self.paused:
+                self.draw_help_bar(scr)
             if self.demo and int(self.real_t * 1.5) % 2 == 0:
                 blit_center(scr, self.txt.outlined("DEMO · pulsa cualquier tecla", 34, (255, 220, 120)), W / 2, H - 40)
             if self.state == "over":
@@ -4112,18 +4236,21 @@ class Game:
         if k < 0.999:
             img = pygame.transform.smoothscale(img, (max(1, int(img.get_width() * k)), max(1, int(img.get_height() * k))))
         blit_center(scr, img, W / 2, 140 + bob)
-        tag = self.txt.outlined("Un tomate del tamaño de una casa. Un cocinero diminuto con guantes de boxeo. Noventa segundos.", 26, (235, 225, 215))
-        blit_center(scr, tag, W / 2, 250)
+        if self.menu != "moves":
+            tag = self.txt.outlined("Un tomate del tamaño de una casa. Un cocinero diminuto con guantes de boxeo. Noventa segundos.", 26, (235, 225, 215))
+            blit_center(scr, tag, W / 2, 250)
         if self.menu == "main":
-            self.draw_menu(scr, MENU_MAIN, 70, 290, 430, 40, 38)
+            self.draw_menu(scr, MENU_MAIN, 70, 284, 430, 37, 36)
             if self.cheats_on():
-                scr.blit(self.txt.outlined("trucos activos", 20, (255, 150, 60)), (300, 290 + 12 + 3 * 40 + 9))
+                scr.blit(self.txt.outlined("trucos activos", 20, (255, 150, 60)), (300, 284 + 12 + MENU_MAIN.index("TRUCOS") * 37 + 8))
             best = self.top[0] if self.top else None
             if best:
                 rec = f"Récord: {best['score']:,}".replace(",", " ") + f"  ·  {best['name']}"
-                blit_center(scr, self.txt.outlined(rec, 26, (255, 220, 140)), 285, 545)
+                blit_center(scr, self.txt.outlined(rec, 26, (255, 220, 140)), 285, 604)
         elif self.menu == "options":
             self.draw_menu(scr, MENU_OPTIONS, W / 2 - 330, 284, 660, 34, 30, values=True)
+        elif self.menu == "moves":
+            self.draw_moves(scr, 220)
         elif self.menu == "cheats":
             self.draw_menu(scr, MENU_CHEATS, W / 2 - 330, 262, 660, 33, 30, values=True)
             note = "Con trucos la puntuación no entra en la tabla (cabezón y arcoíris son solo estéticos)"
@@ -4151,6 +4278,91 @@ class Game:
             if val:
                 v = self.txt.plain(val, size, (255, 210, 120) if sel else (190, 185, 200))
                 scr.blit(v, (x + w - 30 - v.get_width(), yy - v.get_height() / 2))
+
+    def move_rows(self) -> list[tuple[str, list[str], str, str]]:
+        """(sección, teclas, nombre, nota) de cada movimiento, con las teclas reales."""
+        k = self.key_label
+        up, dn = k("up"), k("down")
+        return [
+            ("PUÑOS", [k("jab")], "Jab", "rápido y seguro · mantén para el golpe cargado"),
+            ("PUÑOS", [k("cross")], "Directo", "recto y largo"),
+            ("PUÑOS", [k("hook")], "Gancho", "empuja al tomate"),
+            ("PUÑOS", [up, k("jab")], "Gancho ascendente", "hacia arriba, te eleva"),
+            ("PUÑOS", [dn, k("jab")], "Jab bajo", "a ras de suelo · en el aire: Martillo"),
+            ("PATADAS", [k("kick")], "Patada frontal", "mucho alcance y empuje"),
+            ("PATADAS", [up, k("kick")], "Patada alta", "a la parte alta del tomate"),
+            ("PATADAS", [dn, k("kick")], "Barrida", "a ras de suelo"),
+            ("PATADAS", [k("kick") + " (aire)"], "Patada voladora", "en picado, rebota"),
+            ("PATADAS", [k("spin")], "Patada giratoria", "golpea a los dos lados"),
+            ("MOVERSE", [k("jump")], "Saltar", "otra vez en el aire: doble salto"),
+            ("MOVERSE", [k("dash")], "Esquiva", "invulnerable · justo a tiempo: perfecta"),
+        ]
+
+    def draw_key(self, scr, label: str, x: float, y: float, size: int = 22) -> float:
+        """Tecla dibujada como una tapa de teclado. Devuelve su anchura."""
+        img = self.txt.plain(label, size, (30, 24, 34))
+        w, h = max(img.get_width() + 14, size + 8), size + 8
+        pygame.draw.rect(scr, (120, 110, 130), (x, y + 3, w, h), border_radius=6)
+        pygame.draw.rect(scr, (245, 240, 230), (x, y, w, h), border_radius=6)
+        scr.blit(img, (x + (w - img.get_width()) / 2, y + (h - img.get_height()) / 2 + 1))
+        return w
+
+    def draw_moves(self, scr, y: float) -> None:
+        """Lista de movimientos en dos columnas, con las teclas configuradas."""
+        rows = self.move_rows()
+        cw, ch = 1140, 452
+        x0 = W / 2 - cw / 2
+        scr.blit(panel((cw, ch), 220, 18), (x0, y))
+        cols = {"PUÑOS": 0, "MOVERSE": 0, "PATADAS": 1}
+        ys = [y + 14, y + 14]
+        section = {}
+        for sec, keys, name, note in rows:
+            c = cols[sec]
+            x = x0 + 24 + c * (cw / 2)
+            if section.get(c) != sec:
+                section[c] = sec
+                if ys[c] > y + 20:
+                    ys[c] += 6
+                scr.blit(self.txt.outlined(sec, 24, (255, 200, 110)), (x, ys[c]))
+                ys[c] += 30
+            yy = ys[c]
+            kx = x + 8
+            for i, kl in enumerate(keys):
+                kx += self.draw_key(scr, kl, kx, yy, 18) + 3
+                if i < len(keys) - 1:
+                    plus = self.txt.plain("+", 20, (220, 215, 230))
+                    scr.blit(plus, (kx, yy + 3))
+                    kx += plus.get_width() + 3
+            scr.blit(self.txt.plain(name, 25, WHITE), (x + 150, yy))
+            scr.blit(self.txt.plain(note, 19, (185, 180, 200)), (x + 150, yy + 22))
+            ys[c] += 46
+        tips = [
+            "Combo clásico: Jab » Jab » Gancho » Ascendente",
+            "Cualquier puño se remata con una patada",
+            "Golpe en lo alto desde el aire = rebote para trepar",
+        ]
+        ty = ys[1] + 8
+        scr.blit(self.txt.outlined("COMBOS", 24, (255, 200, 110)), (x0 + 24 + cw / 2, ty))
+        for i, tip in enumerate(tips):
+            scr.blit(self.txt.plain(tip, 21, (255, 225, 170)), (x0 + 32 + cw / 2, ty + 32 + i * 26))
+        if self.inp.pad is not None:
+            pad = "Mando: X jab · LB directo · Y gancho · B patada · Back giratoria · A salto · RB esquiva"
+            blit_center(scr, self.txt.plain(pad, 20, (190, 200, 230)), W / 2, y + ch - 16)
+
+    def draw_help_bar(self, scr) -> None:
+        """Teclas en pantalla durante la partida (H las oculta)."""
+        k = self.key_label
+        items = [(k("jab"), "Jab"), (k("cross"), "Directo"), (k("hook"), "Gancho"), (k("kick"), "Patada"), (k("spin"), "Giratoria"), (k("dash"), "Esquiva"), (k("help"), "Ocultar")]
+        imgs = [(kl, self.txt.plain(name, 18, (230, 225, 235))) for kl, name in items]
+        total = sum(len(kl) * 9 + 22 + img.get_width() + 22 for kl, img in imgs)
+        x = W / 2 - total / 2
+        bar = pygame.Surface((total + 24, 34), pygame.SRCALPHA)
+        pygame.draw.rect(bar, (10, 8, 14, 150), bar.get_rect(), border_radius=10)
+        scr.blit(bar, (x - 12, H - 40))
+        for kl, img in imgs:
+            x += self.draw_key(scr, kl, x, H - 36, 16) + 6
+            scr.blit(img, (x, H - 33))
+            x += img.get_width() + 22
 
     def draw_records(self, scr) -> None:
         cw, ch = 620, 420
@@ -4183,8 +4395,9 @@ class Game:
         dim = pygame.Surface((W, H), pygame.SRCALPHA)
         dim.fill((6, 4, 10, 170))
         scr.blit(dim, (0, 0))
-        blit_center(scr, self.txt.outlined("PAUSA", 110, (255, 230, 170), w=5), W / 2, H * 0.36)
-        blit_center(scr, self.txt.outlined("P / Esc / J: seguir   ·   Q: menú", 32, (230, 230, 240)), W / 2, H * 0.36 + 80)
+        blit_center(scr, self.txt.outlined("PAUSA", 64, (255, 230, 170), w=4), W / 2, 44)
+        blit_center(scr, self.txt.outlined("P / Esc / J: seguir   ·   Q: menú", 26, (230, 230, 240)), W / 2, 92)
+        self.draw_moves(scr, 120)
 
     def draw_over(self, scr) -> None:
         k = ease_out(min(1.0, self.over_t / 0.5))
@@ -4333,7 +4546,7 @@ class Bot:
             held.add("right" if target > r.x else "left")
         elif g.t >= self.next_punch:
             held.add("left" if side > 0 else "right")
-            presses.append("hook" if t.armor > 0 else random.choice(["jab", "jab", "hook"]))
+            presses.append("hook" if t.armor > 0 else random.choice(["jab", "jab", "cross", "hook", "kick", "spin"]))
             self.next_punch = g.t + (0.3 if t.armor > 0 else 0.16)
         return held, presses
 
@@ -4481,6 +4694,49 @@ def mechanics(check) -> None:
         seq.append(r.atk)
     check(seq == ["jab", "jab", "hook", "upper"], "cadena " + " → ".join(seq))
     check(t.hp < t.maxhp and g.combo >= 3, "los golpes conectan y suben el combo")
+    # Golpes y patadas: cada entrada lanza su movimiento y conecta
+    for key, held, expect, air in (
+        ("cross", (), "cross", False),
+        ("kick", (), "kick", False),
+        ("kick", ("up",), "highkick", False),
+        ("kick", ("down",), "sweep", False),
+        ("spin", (), "spin", False),
+        ("kick", (), "airkick", True),
+    ):
+        t = _arena(g, 1)
+        r = g.rufo
+        r.x = t.x - t.radii()[0] - 60
+        _run(g, 0.4, {"right"})
+        if air:
+            g.press("jump")
+            _run(g, 0.15, {"jump"})
+        hp = t.hp
+        seen = set()
+        g.press(key)
+        for _ in range(int(0.6 * PHYS_HZ)):
+            _run(g, DT, held)
+            if r.state == "attack":
+                seen.add(r.atk)
+        check(expect in seen and t.hp < hp, f"{MOVE_NAMES[expect]}: sale con su tecla y conecta")
+    t = _arena(g, 1)
+    r = g.rufo
+    r.x = t.x - t.radii()[0] - 30
+    _run(g, 0.3, {"right"})
+    r.facing = -1  # de espaldas al tomate
+    hp = t.hp
+    g.press("spin")
+    _run(g, 0.5)
+    check(t.hp < hp, "la patada giratoria golpea también hacia atrás")
+    t = _arena(g, 1)
+    r = g.rufo
+    r.x = t.x - t.radii()[0] - 60
+    _run(g, 0.4, {"right"})
+    seq = []
+    for k in ("jab", "cross", "kick"):
+        g.press(k)
+        _run(g, 0.5, until=lambda: r.state == "attack" and r.phase()[0] == "rc")
+        seq.append(r.atk)
+    check(seq == ["jab", "cross", "kick"], "cancelación libre: Jab → Directo → Patada")
     # Trepar: doble salto + ascendente con rebote
     t = _arena(g, 1, x=640)
     r = g.rufo
@@ -4669,6 +4925,9 @@ def gallery(out: Path) -> list[str]:
     for _ in range(80):
         g.update(1 / 60)
     shot("menu")
+    g.menu = "moves"
+    shot("movimientos")
+    g.menu = "main"
     for level, attacks, secs, name in ((4, ["roll", "jet"], 5.0, "verde"), (6, ["roll"], 6.0, "podrido"), (9, ["seeds"], 3.0, "pepitas")):
         t = _arena(g, level, attacks, x=820)
         g.tart.warm(t)
